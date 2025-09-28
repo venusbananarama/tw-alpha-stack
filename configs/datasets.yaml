@@ -1,0 +1,38 @@
+﻿# AlphaCity x FinMind ??datasets grouping (2025-09-18)
+groups:
+  prices:
+    - dataset: TaiwanStockPrice
+      mode: market_wide_single_day_or_per_stock
+      slice: month
+    - dataset: TaiwanStockPriceAdj
+      mode: market_wide_single_day_or_per_stock
+      slice: month
+    - dataset: TaiwanStockMarketValue
+      mode: market_wide_single_day_or_per_stock
+      slice: month
+    - dataset: TaiwanStockDayTrading
+      mode: market_wide_single_day_or_per_stock
+      slice: month
+  chip:
+    - dataset: TaiwanStockInstitutionalInvestorsBuySell
+      mode: market_wide_single_day_or_per_stock
+      slice: month
+    - dataset: TaiwanStockTotalInstitutionalInvestors
+      mode: market_wide_single_day_or_per_stock
+      slice: month
+    - dataset: TaiwanStockGovernmentBankBuySell
+      mode: per_day
+      slice: day
+  derivatives:
+    - dataset: TaiwanFuturesDaily
+      mode: market_wide_or_fallback_per_stock
+      slice: month
+    - dataset: TaiwanOptionDaily
+      mode: market_wide_or_fallback_per_stock
+      slice: month
+  macro_others:
+    - dataset: TaiwanStockTotalReturnIndex
+      mode: with_params
+      slice: month
+      params:
+        data_id: ["TAIEX", "OTC"]

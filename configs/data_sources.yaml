@@ -1,0 +1,8 @@
+datahub_root:       C:\AI\tw-alpha-stack\datahub
+reports_root:       C:\AI\tw-alpha-stack\reports
+metrics_root:       C:\AI\tw-alpha-stack\metrics
+logs_root:          C:\AI\tw-alpha-stack\logs
+state_root:         C:\AI\tw-alpha-stack\state
+duckdb_path:        C:\AI\tw-alpha-stack\state\alpha.duckdb
+timezone:           Asia/Taipei
+weekly_anchor:      W-FRI

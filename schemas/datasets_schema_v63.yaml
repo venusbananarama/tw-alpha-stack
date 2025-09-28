@@ -1,0 +1,11 @@
+version: 6.3
+datasets:
+  prices:
+    required_columns: [date, symbol, open, high, low, close, volume]
+    partitions: [yyyymm]
+  chip:
+    required_columns: [date, symbol, buy, sell, net]
+    partitions: [yyyymm]
+validation:
+  allow_extra_columns: true
+  strict_types: false

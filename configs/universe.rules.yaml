@@ -1,0 +1,8 @@
+liquidity:
+  min_turnover_twd_million: 5
+  min_days_traded_ratio: 0.95
+suspension:
+  exclude_suspended: true
+corporate_actions:
+  adjust_dividend: true
+  handle_splits: true

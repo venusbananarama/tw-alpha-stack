@@ -1,0 +1,11 @@
+path,mode,friday_only,rows
+C:\AI\tw-alpha-stack\datahub\silver\alpha\prices\yyyymm=202509\batch-0003fadaff9c4b27ab16c3abf83b3003.parquet,daily->W-FRI,True,1
+C:\AI\tw-alpha-stack\datahub\silver\alpha\prices\yyyymm=202509\batch-001e7a0c657046519e8aae942046709e.parquet,daily->W-FRI,True,1
+C:\AI\tw-alpha-stack\datahub\silver\alpha\prices\yyyymm=202509\batch-0020141c58834b5f9f5b64be4a9f47a5.parquet,daily->W-FRI,True,1
+C:\AI\tw-alpha-stack\datahub\silver\alpha\prices\yyyymm=202509\batch-0028eba8d6b04db2a5ab317713348223.parquet,daily->W-FRI,True,1
+C:\AI\tw-alpha-stack\datahub\silver\alpha\prices\yyyymm=202509\batch-003f68247c684143a91f6878c1262647.parquet,daily->W-FRI,True,1
+C:\AI\tw-alpha-stack\datahub\silver\alpha\prices\yyyymm=202509\batch-00474fd20e5544339ecac9078eeaa05a.parquet,daily->W-FRI,True,1
+C:\AI\tw-alpha-stack\datahub\silver\alpha\prices\yyyymm=202509\batch-004b3714d0cf4179808a73bc1b074830.parquet,daily->W-FRI,True,1
+C:\AI\tw-alpha-stack\datahub\silver\alpha\prices\yyyymm=202509\batch-007009deff2f49b6bd67118940e4e6ec.parquet,daily->W-FRI,True,1
+C:\AI\tw-alpha-stack\datahub\silver\alpha\prices\yyyymm=202509\batch-0070e86e6bc842c38bdec604d081359f.parquet,daily->W-FRI,True,1
+C:\AI\tw-alpha-stack\datahub\silver\alpha\prices\yyyymm=202509\batch-0073c91798814a1cb4ed3d0f1dae6cf5.parquet,daily->W-FRI,True,1

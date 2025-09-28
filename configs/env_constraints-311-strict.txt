@@ -1,0 +1,10 @@
+# AlphaCity v2/v3 協調版標準 (Python 3.11.x)
+numpy==2.0.2
+pandas==2.2.3
+numba==0.60.0
+llvmlite==0.43.0
+bottleneck==1.4.0
+pyarrow==17.0.0
+vectorbt==0.26.0
+pandas-ta==0.3.14b0
+TA-Lib==0.4.28

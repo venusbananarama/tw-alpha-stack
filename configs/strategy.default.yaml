@@ -1,0 +1,14 @@
+output_dir: reports
+signals:
+  layers:
+    trend:    ["trend_bin","adx14"]
+    momentum: ["roc10","rsi14","macd"]
+    volume:   ["volz60","mfi14"]
+    smc:      ["choch"]
+    special:  []
+  weights:
+    trend: 0.30
+    momentum: 0.35
+    volume: 0.20
+    smc: 0.10
+    special: 0.05

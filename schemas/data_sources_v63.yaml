@@ -1,0 +1,8 @@
+version: 6.3
+sources:
+  finmind:
+    rate_limit_qps: 1.6
+    retries: 3
+    backoff_seconds: 10
+  twse_openapi:
+    enabled: false

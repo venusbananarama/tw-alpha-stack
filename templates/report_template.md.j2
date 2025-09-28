@@ -1,0 +1,31 @@
+# {{ title }}
+
+- 產出時間：{{ generated_at }}
+
+## 策略指標
+- 期間：{{ strategy.start_date }} → {{ strategy.end_date }}（{{ strategy.periods }} 筆）
+- CAGR：{{ '%.2f%%' % (strategy.cagr*100) if strategy.cagr==strategy.cagr else '—' }}
+- 總報酬：{{ '%.2f%%' % (strategy.total_return*100) if strategy.total_return==strategy.total_return else '—' }}
+- 波動（年化）：{{ '%.2f%%' % (strategy.vol*100) if strategy.vol==strategy.vol else '—' }}
+- Sharpe：{{ '%.2f' % strategy.sharpe if strategy.sharpe==strategy.sharpe else '—' }}
+- Sortino：{{ '%.2f' % strategy.sortino if strategy.sortino==strategy.sortino else '—' }}
+- 最大回撤：{{ '%.2f%%' % (strategy.max_dd*100) if strategy.max_dd==strategy.max_dd else '—' }}
+- Calmar：{{ '%.2f' % strategy.calmar if strategy.calmar==strategy.calmar else '—' }}
+- 勝率：{{ '%.2f%%' % (strategy.win_rate*100) if strategy.win_rate==strategy.win_rate else '—' }}
+- 單日最好 / 最差：{{ '%.2f%%' % (strategy.best_day*100) if strategy.best_day==strategy.best_day else '—' }} / {{ '%.2f%%' % (strategy.worst_day*100) if strategy.worst_day==strategy.worst_day else '—' }}
+
+{% if benchmark %}
+## Benchmark 指標
+- 期間：{{ benchmark.start_date }} → {{ benchmark.end_date }}（{{ benchmark.periods }} 筆）
+- CAGR：{{ '%.2f%%' % (benchmark.cagr*100) if benchmark.cagr==benchmark.cagr else '—' }}
+- 總報酬：{{ '%.2f%%' % (benchmark.total_return*100) if benchmark.total_return==benchmark.total_return else '—' }}
+- 波動（年化）：{{ '%.2f%%' % (benchmark.vol*100) if benchmark.vol==benchmark.vol else '—' }}
+- Sharpe：{{ '%.2f' % benchmark.sharpe if benchmark.sharpe==benchmark.sharpe else '—' }}
+- 最大回撤：{{ '%.2f%%' % (benchmark.max_dd*100) if benchmark.max_dd==benchmark.max_dd else '—' }}
+{% endif %}
+
+## 圖表
+![NAV / Benchmark]({{ images.nav_or_vs }})
+![Drawdown]({{ images.drawdown }})
+![Rolling Sharpe]({{ images.rolling_sharpe }})
+  

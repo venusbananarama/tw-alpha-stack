@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "verify_summary (fix6.2)",
+  "type": "object",
+  "required": [
+    "status",
+    "reason",
+    "rows",
+    "landing",
+    "noop",
+    "generatedAt",
+    "params",
+    "results"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "6.2"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "PASS_NOOP",
+        "FAIL",
+        "UNKNOWN"
+      ]
+    },
+    "reason": {
+      "type": "string"
+    },
+    "rows": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "landing": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "noop": {
+      "type": "boolean"
+    },
+    "params": {
+      "type": "object",
+      "required": [
+        "end"
+      ],
+      "properties": {
+        "startFull": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startSingle": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "end": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "workers": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "qps": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "calendarCsv": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "results": {
+      "type": "object",
+      "properties": {
+        "single": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "rows": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "landings": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "errors": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "pass": {
+              "type": "boolean"
+            },
+            "passReason": {
+              "type": "string"
+            },
+            "csv": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "rows",
+            "landings",
+            "errors",
+            "pass",
+            "passReason"
+          ]
+        },
+        "full": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "single"
+      ]
+    },
+    "error": {}
+  }
+}

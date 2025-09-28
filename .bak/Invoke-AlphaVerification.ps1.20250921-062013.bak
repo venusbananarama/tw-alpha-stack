@@ -1,0 +1,118 @@
+param(
+  [string]$Start   = "2015-01-01",
+  [string]$End     = (Get-Date).ToString("yyyy-MM-dd"),
+  [string]$Symbol  = "2330.TW",
+  [int]   $Workers = 6,
+  [double]$Qps     = 1.6,
+  [switch]$VerboseCmd
+)
+
+$ErrorActionPreference = "Stop"
+
+# 路徑與 Python
+$RepoRoot   = Resolve-Path (Join-Path $PSScriptRoot "..\..")
+$PyDefault  = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+$PythonExe  = (Test-Path $PyDefault) ? $PyDefault : "python"
+$MetricsDir = Join-Path $RepoRoot "metrics"
+$Datahub    = Join-Path $RepoRoot "datahub"
+
+function Normalize-Symbol([string]$s){
+  if(-not $s){ return $null }
+  $t = $s.Trim()
+  $t = $t -replace '^TPE:',''
+  $t = $t -replace '^TW:',''
+  $t = $t -replace '\.TWO?$',''
+  $t = $t -replace '[^\d]',''
+  return $t
+}
+$SymbolNum = Normalize-Symbol $Symbol
+
+# 執行 Python 並擷取本次 metrics；含等待落地與回退策略
+function Invoke-PyCapture([string[]]$pyArgs){
+  $cmd = "$PythonExe " + ($pyArgs -join ' ')
+  if($VerboseCmd){ Write-Host "[RUN] $cmd" }
+
+  $start = Get-Date
+  $lines = & $PythonExe $pyArgs 2>&1
+  $text  = [string]::Join("`n", $lines)
+
+  # 1) 先用 regex 從輸出文字找 "metrics: <path>"
+  $m = [regex]::Match($text, 'metrics:\s+(.+?ingest_summary_[^ \t\r\n]+\.csv)')
+  if($m.Success){
+    $p = $m.Groups[1].Value
+    for($i=0; $i -lt 10; $i++){
+      if(Test-Path $p){ Write-Host "[METRICS] $p"; return $p }
+      Start-Sleep -Milliseconds 300
+    }
+  }
+
+  # 2) 以呼叫時間為界，抓呼叫時點後寫入的最新檔
+  $cand = Get-ChildItem (Join-Path $MetricsDir 'ingest_summary_*') -ErrorAction SilentlyContinue |
+          Where-Object { $_.LastWriteTime -ge $start.AddMinutes(-2) } |
+          Sort-Object LastWriteTime -Desc | Select-Object -First 1
+  if($cand){ Write-Host "[METRICS-FALLBACK-MTIME] $($cand.FullName)"; return $cand.FullName }
+
+  # 3) 最後保底：目錄最新
+  $latest = Get-ChildItem (Join-Path $MetricsDir 'ingest_summary_*') -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Desc | Select-Object -First 1
+  if($latest){ Write-Host "[METRICS-FALLBACK-LATEST] $($latest.FullName)"; return $latest.FullName }
+
+  throw "無法定位 metrics CSV（無匹配輸出，且 metrics 目錄為空）"
+}
+
+function Test-Full([string]$csv){
+  $df   = Import-Csv $csv
+  $px   = $df | Where-Object { $_.dataset -match 'TaiwanStockPrice|prices' }
+  $call = ($px | % { [int]$_.calls }  | Measure-Object -Sum).Sum
+  $err  = ($px | % { [int]$_.errors } | Measure-Object -Sum).Sum
+  $row  = ($px | % { [int]$_.rows }   | Measure-Object -Sum).Sum
+  [pscustomobject]@{
+    File   = (Split-Path $csv -Leaf)
+    Calls  = $call
+    Errors = $err
+    Rows   = $row
+    PASS   = ($call -le 3 -and $err -eq 0 -and $row -gt 0)
+  }
+}
+
+function Test-Single([string]$csv){
+  $df   = Import-Csv $csv
+  $ds   = $df | Where-Object { $_.dataset -match 'TaiwanStockPrice|prices|chip' }
+  $err  = ($ds | % { [int]$_.errors } | Measure-Object -Sum).Sum
+  $row  = ($ds | % { [int]$_.rows }   | Measure-Object -Sum).Sum
+  $hasSymCol = ($df | Get-Member -Name symbols -ErrorAction SilentlyContinue) -ne $null
+  $hasSymVal = $false
+  if($hasSymCol){ $hasSymVal = $df.symbols | Where-Object { $_ -and $_.Trim() -ne '' } | Select-Object -First 1 }
+  [pscustomobject]@{
+    File      = (Split-Path $csv -Leaf)
+    HasSymbol = [bool]$hasSymVal
+    Errors    = $err
+    Rows      = $row
+    PASS      = ($err -eq 0 -and $row -gt 0 -and (-not $hasSymCol -or $hasSymVal))
+  }
+}
+
+Write-Host "[INFO] Running full-market test (prices dataset)..."
+$fullCsv = Invoke-PyCapture @('scripts\finmind_backfill.py',
+  '--start', $Start, '--end', $End, '--datasets', 'TaiwanStockPrice',
+  '--universe', 'TSE', '--workers', "$Workers", '--qps', "$Qps", '--hourly-cap', '6000'
+)
+
+Write-Host "[INFO] Running single-stock test on $Symbol for last 5 days..."
+$start5 = (Get-Date $End).AddDays(-5).ToString('yyyy-MM-dd')
+$singleCsv = Invoke-PyCapture @('scripts\finmind_backfill.py',
+  '--start', $start5, '--end', $End, '--symbols', $SymbolNum,
+  '--datasets', 'TaiwanStockPrice', 'TaiwanStockInstitutionalInvestorsBuySell',
+  '--workers', '2', '--qps', '1'
+)
+
+Write-Host "`n-- Full Market --`n"
+Test-Full $fullCsv | Format-List
+
+Write-Host "`n-- Single Stock --`n"
+Test-Single $singleCsv | Format-List
+
+Write-Host "`n-- Recent Parquet Files --`n"
+Get-ChildItem (Join-Path $Datahub 'silver\alpha') -Recurse -Filter *.parquet |
+  Sort-Object LastWriteTime -Desc | Select-Object -First 6 |
+  Format-Table LastWriteTime, FullName -Auto

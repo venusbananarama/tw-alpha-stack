@@ -1,0 +1,7 @@
+indices:
+  - id: "TAIEX_TR"
+    provider: "TWSE"
+    freq: "D"
+  - id: "OTC_TR"
+    provider: "TPEx"
+    freq: "D"

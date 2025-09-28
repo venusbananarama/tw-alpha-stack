@@ -1,0 +1,8 @@
+
+topN: 50
+rebalance: M   # D=Daily, W=Weekly, M=Monthly
+fees: 0.0005
+slippage: 0.0005
+delay: 1       # trade on next bar after signal
+start: null    # e.g., "2015-01-01"
+end:   null

@@ -1,0 +1,7 @@
+fees_bps: 2.5
+tax_bps: 30
+slippage_bps: 5
+impact:
+  enabled: true
+  k: 0.1
+  turnover_cap: 0.8

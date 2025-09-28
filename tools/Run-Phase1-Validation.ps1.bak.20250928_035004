@@ -1,0 +1,79 @@
+<#
+.SYNOPSIS
+  AlphaCity Phase-1 一鍵驗收（資料基建 & 回測核心）
+
+.NOTES
+  會在 metrics\phase1_manifest_latest.json 寫入本次輸出清單，方便回滾清理。
+#>
+param(
+  [string]$Root   = 'G:/AI/tw-alpha-stack',
+  [string]$Symbol = '2330.TW',
+  [string]$Start  = (Get-Date).AddDays(-7).ToString('yyyy-MM-dd'),
+  [string]$End    = (Get-Date).ToString('yyyy-MM-dd')
+)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+function Step { param([string]$Name,[scriptblock]$Action)
+  $sw=[Diagnostics.Stopwatch]::StartNew()
+  Write-Host "`n=== [$Name] ===" -ForegroundColor Cyan
+  try { & $Action; $sw.Stop(); Write-Host "✔ [$Name] OK ($($sw.Elapsed))" -ForegroundColor Green }
+  catch { $sw.Stop(); Write-Host "✗ [$Name] FAIL ($($sw.Elapsed))" -ForegroundColor Red; Write-Host $_.Exception.Message -ForegroundColor Red; throw }
+}
+function Invoke-IfExists { param([string]$Path,[string[]]$Args)
+  if(Test-Path $Path){ & $Path @Args } else { Write-Host "跳過（找不到）：$Path" -ForegroundColor Yellow }
+}
+Set-Location $Root
+$manifest = [ordered]@{
+  run_id = (Get-Date -UFormat %Y%m%d-%H%M%S);
+  root   = $Root; start=$Start; end=$End; symbol=$Symbol;
+  outputs = @();
+  logs    = @();
+}
+# 0) 檢查
+Step 'Layout Check' { Invoke-IfExists "$Root/tools/Check-CanonicalLayout.ps1" @('-Strict') }
+Step 'Env Check'    { Invoke-IfExists "$Root/tools/check_env.ps1" @() }
+# 1) 行事曆
+if(Test-Path "$Root/tools/Normalize-Calendar.ps1"){ Step 'Normalize Calendar' { & "$Root/tools/Normalize-Calendar.ps1" } }
+# 2) 全市場增量
+Step 'FM Backfill (All, 7D, price+inst)' {
+  & "$Root/scripts/ps/Invoke-FMBackfill.ps1" -Start $Start -End $End -Datasets @('TaiwanStockPrice','TaiwanStockInstitutionalInvestorsBuySell') -Universe TSE -Workers 6 -Qps 1.6 -VerboseCmd
+  $manifest.logs += "$Root/metrics/fetch_backfill_latest.log"
+}
+# 3) 單股（date_id 抽測）
+Step 'FM Single (date_id sample)' {
+  & "$Root/scripts/ps/Invoke-FMSingle.ps1" -Start '2015-01-01' -End $End -Symbol $Symbol -Datasets @('TaiwanStockFinancialStatements','TaiwanStockBalanceSheet','TaiwanStockCashFlowsStatement','TaiwanStockDividend','TaiwanStockPER')
+  $manifest.logs += "$Root/metrics/fetch_single_latest.log"
+}
+# 4) 因子週檢
+Step 'Weekly Factors Smoke' { & "$Root/tools/Run-SmokeTests.ps1" }
+# 5) 回測
+$runRoot = 'G:/AI/datahub/alpha/backtests/_phase1_validation'
+$newId   = Get-Date -UFormat %Y%m%d-%H%M%S
+$outDir  = Join-Path $runRoot $newId
+New-Item -ItemType Directory -Force $outDir | Out-Null
+Step 'Backtest TopN' {
+  & python "$Root/backtest/longonly_topN.py" --factors 'G:/AI/datahub/alpha/alpha_factors_fixed.parquet' --out-dir $outDir --config "$Root/configs/backtest_topN_fixed.yaml"
+}
+$manifest.outputs += $outDir
+# 6) 報表
+Step 'Make Report' {
+  $nav = Get-ChildItem -Path $outDir -Recurse -Filter nav_clean.csv | Select-Object -First 1
+  if (-not $nav) { throw "nav_clean.csv not found in $outDir" }
+  $repDir = 'G:/AI/datahub/alpha/reports'
+  & python "$Root/make_report_safe.py" --nav-csv $nav.FullName --out-dir $repDir
+  $manifest.outputs += $repDir
+}
+# 7) AckLive（可選）
+if (Test-Path "$Root/AlphaCity_v63_live_addon_v2/tools/AckLive.ps1") {
+  . "$Root/AlphaCity_v63_live_addon_v2/tools/AckLive.ps1"
+  Step 'AckLive Summary' {
+    acklive -Start $Start -End $End -Symbol $Symbol -NoFsScan
+  }
+  $manifest.logs += "$Root/AlphaCity_v63_live_addon_v2/logs/acklive.log"
+}
+# 寫入 manifest
+$manPath = "$Root/metrics/phase1_manifest_latest.json"
+New-Item -ItemType Directory -Force (Split-Path $manPath) | Out-Null
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 $manPath
+Write-Host "`n📄 Manifest written: $manPath" -ForegroundColor Cyan
+Write-Host "🎉 Phase-1 validation finished." -ForegroundColor Green

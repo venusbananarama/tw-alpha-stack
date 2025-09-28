@@ -1,0 +1,12 @@
+combos:
+  - factors:
+      - ["composite_score"]
+      - ["mom_252_21", "vol_20"]
+    weights:
+      - null
+      - [0.7, 0.3]
+    combine: zscore_mean
+    grid:
+      topN: [30, 50]
+      fees_bps: [2.5, 10]
+  

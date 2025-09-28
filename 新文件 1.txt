@@ -1,0 +1,15 @@
+.\scripts\ps\Set-FMToken.ps1 -Token "<	
+eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAyNS0wOS0xOCAwMTowOTozMyIsInVzZXJfaWQiOiJmYXRuZWV0IiwiaXAiOiIxODAuMTc2Ljg0LjE0In0.fj9fcB5fH7_US0DGxTYEzhzV33wbpIiv166sBMBtNOM>"
+
+
+
+$env:FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAyNS0wOS0xOCAwMTowOTozMyIsInVzZXJfaWQiOiJmYXRuZWV0IiwiaXAiOiIxODAuMTc2Ljg0LjE0In0.fj9fcB5fH7_US0DGxTYEzhzV33wbpIiv166sBMBtNOM"
+
+New-Item -ItemType Directory -Force "G:\AI\tw-alpha-stack\secrets" | Out-Null
+Set-Content "G:\AI\tw-alpha-stack\secrets\finmind_token.txt" "<eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAyNS0wOS0xOCAwMTowOTozMyIsInVzZXJfaWQiOiJmYXRuZWV0IiwiaXAiOiIxODAuMTc2Ljg0LjE0In0.fj9fcB5fH7_US0DGxTYEzhzV33wbpIiv166sBMBtNOM>"
+
+-ApiToken "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAyNS0wOS0xOCAwMTowOTozMyIsInVzZXJfaWQiOiJmYXRuZWV0IiwiaXAiOiIxODAuMTc2Ljg0LjE0In0.fj9fcB5fH7_US0DGxTYEzhzV33wbpIiv166sBMBtNOM"
+
+
+[Environment]::SetEnvironmentVariable('FINMIND_TOKEN', 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAyNS0wOS0xOCAwMTowOTozMyIsInVzZXJfaWQiOiJmYXRuZWV0IiwiaXAiOiIxODAuMTc2Ljg0LjE0In0.fj9fcB5fH7_US0DGxTYEzhzV33wbpIiv166sBMBtNOM', 'User')  # 永久（使用者層級）
+$env:FINMIND_TOKEN = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAyNS0wOS0xOCAwMTowOTozMyIsInVzZXJfaWQiOiJmYXRuZWV0IiwiaXAiOiIxODAuMTc2Ljg0LjE0In0.fj9fcB5fH7_US0DGxTYEzhzV33wbpIiv166sBMBtNOM'                                           # 立刻生效於當前視窗

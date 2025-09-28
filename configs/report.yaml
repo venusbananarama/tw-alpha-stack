@@ -1,0 +1,6 @@
+weekly_check:
+  lookback_years: 10
+  out_dir: _smoketest\_weekly
+silver_validate:
+  schema_path: schemas\datasets_schema.yaml
+  out_csv: metrics\silver_check_latest.csv

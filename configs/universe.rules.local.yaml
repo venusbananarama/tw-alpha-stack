@@ -1,0 +1,6 @@
+# Phase 1：只做資料層治理（停牌/流動性/上市日），不含策略權重與成本
+min_listing_days: 1
+exclude_status:   [halted, suspended, delisted]
+min_price: 0
+min_avg_turnover_mil: 0
+allow_boards:     [TSE, OTC]

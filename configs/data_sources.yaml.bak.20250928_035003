@@ -1,0 +1,8 @@
+datahub_root:      C:\AI\tw-alpha-stack\datahub
+warrant_root:      C:\AI\tw-alpha-stack\warrants
+backtests_root:    C:\AI\tw-alpha-stack\backtest
+reports_root:      C:\AI\tw-alpha-stack\reports
+logs_root:         C:\AI\tw-alpha-stack\logs
+metrics_root:      C:\AI\tw-alpha-stack\metrics
+duckdb_path:       C:\AI\tw-alpha-stack\state\alpha.duckdb
+duckdb_path_backup:C:\AI\tw-alpha-stack\state\alpha.duckdb.bak

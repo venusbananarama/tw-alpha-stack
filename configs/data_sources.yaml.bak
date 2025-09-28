@@ -1,0 +1,8 @@
+datahub_root: 
+warrant_root: 
+backtests_root: 
+reports_root: 
+logs_root: 
+metrics_root: 
+duckdb_path: 
+duckdb_path_backup: 

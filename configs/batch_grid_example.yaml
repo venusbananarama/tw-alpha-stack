@@ -1,0 +1,7 @@
+base:
+  config: "configs/backtest_topN_fixed.yaml"
+  factors: ["composite_score", "mom_252_21", "vol_20"]
+  topN: [30, 50]
+  fees_bps: [2.5, 10]
+  tax_bps: [30]
+  extra: ["", "--neutralize_by industry"]

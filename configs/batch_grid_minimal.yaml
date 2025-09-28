@@ -1,0 +1,7 @@
+base:
+  config: "configs/backtest_topN_fixed.yaml"
+  factors: ["G:/AI/datahub/alpha/alpha_factors_fixed.parquet"]
+  topN: [10, 30]
+  fees_bps: [2.5]
+  tax_bps: [30]
+  extra: [""]

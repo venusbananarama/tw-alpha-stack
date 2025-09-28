@@ -1,0 +1,109 @@
+param(
+  [string]$Start   = "2015-01-01",
+  [string]$End     = (Get-Date).ToString("yyyy-MM-dd"),
+  [string]$Symbol  = "2330.TW",
+  [int]   $Workers = 6,
+  [double]$Qps     = 1.6,
+  [switch]$VerboseCmd
+)
+
+$ErrorActionPreference = "Stop"
+
+# 路徑與 Python
+$RepoRoot   = Resolve-Path (Join-Path $PSScriptRoot "..\..")
+$PyDefault  = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+$PythonExe  = (Test-Path $PyDefault) ? $PyDefault : "python"
+$MetricsDir = Join-Path $RepoRoot "metrics"
+$Datahub    = Join-Path $RepoRoot "datahub"
+
+function Normalize-Symbol([string]$s){
+  if(-not $s){ return $null }
+  $t = $s.Trim()
+  $t = $t -replace '^TPE:',''
+  $t = $t -replace '^TW:',''
+  $t = $t -replace '\.TWO?$',''
+  $t = $t -replace '[^\d]',''
+  return $t
+}
+$SymbolNum = Normalize-Symbol $Symbol
+
+# 執行 Python 並從輸出找 metrics 路徑；若不存在則重試與回退
+function Invoke-PyCapture([string[]]$pyArgs){
+  $cmd = "$PythonExe " + ($pyArgs -join ' ')
+  if($VerboseCmd){ Write-Host "[RUN] $cmd" }
+  $log = & $PythonExe $pyArgs 2>&1 | Tee-Object -Variable _raw
+  $m   = ($log | Select-String -Pattern 'metrics:\s+(?<p>.+ingest_summary_[^\s]+\.csv)').Matches | Select-Object -Last 1
+  $rawPath = if($m){ $m.Groups['p'].Value } else { $null }
+
+  # 等檔案落地（最多 3 秒）
+  $cand = @()
+  if($rawPath){ $cand += $rawPath }
+  for($i=0; $i -lt 6; $i++){
+    foreach($p in $cand){ if(Test-Path $p){ Write-Host "[METRICS] $p"; return $p } }
+    Start-Sleep -Milliseconds 500
+  }
+
+  # 回退：抓 metrics 目錄最新檔
+  $latest = Get-ChildItem (Join-Path $MetricsDir 'ingest_summary_*') -ErrorAction SilentlyContinue |
+              Sort-Object LastWriteTime -Desc | Select-Object -First 1
+  if($latest){ $p=$latest.FullName; Write-Host "[METRICS-FALLBACK] $p"; return $p }
+
+  throw "無法定位 metrics CSV（無匹配輸出，且 metrics 目錄為空）"
+}
+
+function Test-Full([string]$csv){
+  $df   = Import-Csv $csv
+  $px   = $df | Where-Object { $_.dataset -match 'TaiwanStockPrice|prices' }
+  $call = ($px | % { [int]$_.calls }  | Measure-Object -Sum).Sum
+  $err  = ($px | % { [int]$_.errors } | Measure-Object -Sum).Sum
+  $row  = ($px | % { [int]$_.rows }   | Measure-Object -Sum).Sum
+  [pscustomobject]@{
+    File   = (Split-Path $csv -Leaf)
+    Calls  = $call
+    Errors = $err
+    Rows   = $row
+    PASS   = ($call -le 3 -and $err -eq 0 -and $row -gt 0)
+  }
+}
+
+function Test-Single([string]$csv){
+  $df   = Import-Csv $csv
+  $ds   = $df | Where-Object { $_.dataset -match 'TaiwanStockPrice|prices|chip' }
+  $err  = ($ds | % { [int]$_.errors } | Measure-Object -Sum).Sum
+  $row  = ($ds | % { [int]$_.rows }   | Measure-Object -Sum).Sum
+  $hasSymCol = ($df | Get-Member -Name symbols -ErrorAction SilentlyContinue) -ne $null
+  $hasSymVal = $false
+  if($hasSymCol){ $hasSymVal = $df.symbols | Where-Object { $_ -and $_.Trim() -ne '' } | Select-Object -First 1 }
+  [pscustomobject]@{
+    File      = (Split-Path $csv -Leaf)
+    HasSymbol = [bool]$hasSymVal
+    Errors    = $err
+    Rows      = $row
+    PASS      = ($err -eq 0 -and $row -gt 0 -and (-not $hasSymCol -or $hasSymVal))
+  }
+}
+
+Write-Host "[INFO] Running full-market test (prices dataset)..."
+$fullCsv = Invoke-PyCapture @('scripts\finmind_backfill.py',
+  '--start', $Start, '--end', $End, '--datasets', 'TaiwanStockPrice',
+  '--universe', 'TSE', '--workers', $Workers, '--qps', $Qps, '--hourly-cap', '6000'
+)
+
+Write-Host "[INFO] Running single-stock test on $Symbol for last 5 days..."
+$start5 = (Get-Date $End).AddDays(-5).ToString('yyyy-MM-dd')
+$singleCsv = Invoke-PyCapture @('scripts\finmind_backfill.py',
+  '--start', $start5, '--end', $End, '--symbols', $SymbolNum,
+  '--datasets', 'TaiwanStockPrice', 'TaiwanStockInstitutionalInvestorsBuySell',
+  '--workers', '2', '--qps', '1'
+)
+
+Write-Host "`n-- Full Market --`n"
+Test-Full $fullCsv | Format-List
+
+Write-Host "`n-- Single Stock --`n"
+Test-Single $singleCsv | Format-List
+
+Write-Host "`n-- Recent Parquet Files --`n"
+Get-ChildItem (Join-Path $Datahub 'silver\alpha') -Recurse -Filter *.parquet |
+  Sort-Object LastWriteTime -Desc | Select-Object -First 6 |
+  Format-Table LastWriteTime, FullName -Auto

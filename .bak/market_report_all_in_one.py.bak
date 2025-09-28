@@ -1,0 +1,381 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Market All-In-One Report (robust, no-KeyError version)
+
+- Handles pandas groupby.apply behavior changes (no reliance on 'symbol' column inside groups)
+- Computes returns/volatility/liquidity stats
+- Optional board aggregation and a simple chart
+- Well-formatted Excel output
+"""
+
+import argparse
+import os
+import sys
+import warnings
+from datetime import datetime
+
+import numpy as np
+import pandas as pd
+
+pd.options.mode.copy_on_write = True
+
+
+def info(msg: str):
+    print(f"[INFO] {msg}", flush=True)
+
+
+def warn(msg: str):
+    print(f"[WARN] {msg}", flush=True)
+
+
+def error(msg: str):
+    print(f"[ERROR] {msg}", flush=True)
+
+
+def read_df(path: str) -> pd.DataFrame:
+    info(f"讀取 {path} ...")
+    df = pd.read_parquet(path)
+
+    # Normalize columns if needed
+    # Expect at least: date, open, high, low, close, adj_close, volume, symbol
+    cols = list(df.columns)
+    lower_cols = [str(c).lower() for c in cols]
+
+    # If MultiIndex-like column names appear as strings from a previous merge ("('date','')"), fix them.
+    rename_map = {}
+    for c in cols:
+        s = str(c)
+        if s.replace(" ", "").lower() in {"('date','')", "date"}:
+            rename_map[c] = "date"
+        elif s.replace(" ", "").lower().endswith("open')") or s.lower() == "open":
+            # try to catch strings like "('open', '2330.TW')"
+            rename_map[c] = "open" if "open" in s.lower() else s
+        elif s.replace(" ", "").lower().endswith("high')") or s.lower() == "high":
+            rename_map[c] = "high" if "high" in s.lower() else s
+        elif s.replace(" ", "").lower().endswith("low')") or s.lower() == "low":
+            rename_map[c] = "low" if "low" in s.lower() else s
+        elif s.replace(" ", "").lower().endswith("close')") or s.lower() == "close":
+            rename_map[c] = "close" if "close" in s.lower() else s
+        elif s.replace(" ", "").lower().endswith("adj_close')") or s.lower() == "adj_close":
+            rename_map[c] = "adj_close" if "adj_close" in s.lower() else s
+        elif s.replace(" ", "").lower().endswith("volume')") or s.lower() == "volume":
+            rename_map[c] = "volume" if "volume" in s.lower() else s
+
+    if rename_map:
+        df = df.rename(columns=rename_map)
+
+    # Ensure mandatory columns exist
+    required = ["date", "open", "high", "low", "close", "adj_close", "volume", "symbol"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        # If only 'symbol' is missing, sometimes it was the index from previous pipelines
+        if "symbol" in missing and getattr(df.index, "name", None) == "symbol":
+            df = df.reset_index()
+            missing = [c for c in required if c not in df.columns]
+
+    if missing:
+        error(f"缺少必要欄位：{missing}")
+        raise KeyError(", ".join(missing))
+
+    # Dtypes
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    for c in ["open", "high", "low", "close", "adj_close", "volume"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # Clean obvious bad rows (no date or symbol)
+    df = df.dropna(subset=["date", "symbol"]).copy()
+
+    # Trim spaces in symbol just in case
+    df["symbol"] = df["symbol"].astype(str).str.strip()
+
+    return df
+
+
+def per_symbol_calc(g: pd.DataFrame) -> pd.DataFrame:
+    """Compute all per-symbol rolling metrics. Robust to missing 'symbol' column inside group."""
+    g = g.sort_values("date").copy()
+
+    # If 'symbol' column is missing (because of future pandas include_groups change), recover from group name
+    if "symbol" not in g.columns:
+        # groupby.apply will set g.name to the key
+        sym = g.attrs.get("_group_name_", None)
+        if sym is None:
+            # Try pandas >=1.5 style: assigned by wrapper before calling
+            sym = getattr(g, "_symbol_name_fallback_", None)
+        if sym is None:
+            # Last resort: try to infer from index if it is unique constant
+            sym = None
+        if sym is not None:
+            g["symbol"] = sym
+
+    # Returns
+    g["ret_1d"] = g["close"].pct_change(1)
+    g["ret_5d"] = g["close"].pct_change(5)
+    g["ret_20d"] = g["close"].pct_change(20)
+    g["ret_60d"] = g["close"].pct_change(60)
+
+    # YTD return
+    g["_year"] = g["date"].dt.year
+    g["_y_first"] = g.groupby("_year")["close"].transform("first")
+    g["ret_ytd"] = g["close"] / g["_y_first"] - 1.0
+    g.drop(columns=["_y_first"], inplace=True)
+
+    # Volatility (20D) based on daily returns std
+    r1 = g["close"].pct_change()
+    g["vol_20d"] = r1.rolling(20, min_periods=10).std()
+
+    # Liquidity
+    g["adv20"] = g["volume"].rolling(20, min_periods=10).mean()
+    g["aat20"] = (g["close"] * g["volume"]).rolling(20, min_periods=10).mean()
+
+    return g
+
+
+def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    info("計算報酬、波動與成交額指標 ...")
+
+    df = df.sort_values(["symbol", "date"]).copy()
+
+    # Use apply but NEVER rely on grouping column presence inside groups.
+    # We pass the group key through attrs to be extra-safe across pandas versions.
+    def wrapper(sym, chunk):
+        chunk = chunk.copy()
+        chunk.attrs["_group_name_" ] = sym  # allow per_symbol_calc() to find symbol
+        return per_symbol_calc(chunk)
+
+    grouped = []
+    for sym, chunk in df.groupby("symbol", sort=False, group_keys=False):
+        grouped.append(wrapper(sym, chunk))
+    out = pd.concat(grouped, axis=0, ignore_index=True)
+
+    return out
+
+
+def make_summary(latest: pd.DataFrame, map_df: pd.DataFrame | None, topn: int) -> dict:
+    # pick last row per symbol
+    idx = latest.groupby("symbol")["date"].idxmax()
+    snap = latest.loc[idx, ["symbol", "date", "close", "ret_20d", "ret_60d", "ret_ytd", "vol_20d", "adv20", "aat20"]].copy()
+
+    # merge board mapping if available
+    if map_df is not None:
+        merged = snap.merge(map_df, on="symbol", how="left")
+        merged["board"] = merged["board"].fillna("Unknown")
+    else:
+        merged = snap
+        merged["board"] = "Unknown"
+
+    # Sheets
+    topmovers = merged.sort_values("ret_20d", ascending=False).head(topn).reset_index(drop=True)
+
+    momentum_vol = merged.sort_values(["ret_20d", "ret_60d"], ascending=[False, False]).reset_index(drop=True)
+
+    liquidity = merged.sort_values("aat20", ascending=False).reset_index(drop=True)
+
+    # Board stats
+    board_stats = None
+    if "board" in merged.columns:
+        board_stats = (
+            merged.groupby("board")
+            .agg(
+                cnt=("symbol", "count"),
+                avg_ret_20d=("ret_20d", "mean"),
+                avg_ret_ytd=("ret_ytd", "mean"),
+                med_vol_20d=("vol_20d", "median"),
+                sum_amt=("aat20", "sum"),
+            )
+            .reset_index()
+            .sort_values("avg_ret_20d", ascending=False)
+        )
+
+    return {
+        "snapshot": merged,
+        "topmovers": topmovers,
+        "momentum_vol": momentum_vol,
+        "liquidity": liquidity,
+        "board_stats": board_stats,
+    }
+
+
+def health_checks(df: pd.DataFrame) -> dict:
+    # duplicates per (symbol, date)
+    dup_mask = df.duplicated(subset=["symbol", "date"], keep=False)
+    dup_by_symbol = (
+        df.loc[dup_mask, ["symbol", "date"]]
+        .groupby("symbol")
+        .size()
+        .reset_index(name="dup_rows")
+        .sort_values("dup_rows", ascending=False)
+    )
+
+    # missing counts per symbol
+    miss = (
+        df.groupby("symbol")[["open", "high", "low", "close", "volume"]]
+        .apply(lambda s: s.isna().sum())
+        .reset_index()
+    )
+
+    # non-positive prices
+    bad_price = df[df["close"] <= 0][["symbol", "date", "close"]].sort_values(["symbol", "date"])
+
+    # summary row
+    summary = pd.DataFrame(
+        {
+            "metric": ["rows", "symbols", "date_min", "date_max"],
+            "value": [
+                len(df),
+                df["symbol"].nunique(),
+                df["date"].min(),
+                df["date"].max(),
+            ],
+        }
+    )
+
+    return {"summary": summary, "duplicates": dup_by_symbol, "missing": miss, "bad_price": bad_price}
+
+
+def write_excel(out_path: str, latest: pd.DataFrame, packs: dict, detail_syms: list[str], with_charts: bool):
+    info(f"輸出 Excel → {out_path}")
+    out_dir = os.path.dirname(out_path)
+    if out_dir and not os.path.exists(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+
+    with pd.ExcelWriter(out_path, engine="xlsxwriter", datetime_format="yyyy-mm-dd") as writer:
+        wb = writer.book
+
+        # Overview
+        ov = pd.DataFrame(
+            {
+                "項目": ["股票數", "總筆數", "日期起", "日期迄"],
+                "值": [
+                    int(latest["symbol"].nunique()),
+                    int(len(latest)),
+                    latest["date"].min(),
+                    latest["date"].max(),
+                ],
+            }
+        )
+        ov.to_excel(writer, sheet_name="Overview", index=False)
+        ws_ov = writer.sheets["Overview"]
+        ws_ov.freeze_panes(1, 0)
+
+        # HealthChecks
+        hc = health_checks(latest)
+        hc["summary"].to_excel(writer, sheet_name="HealthChecks", index=False, startrow=0)
+        hc["duplicates"].to_excel(writer, sheet_name="HealthChecks", index=False, startrow=6)
+        hc["missing"].to_excel(writer, sheet_name="HealthChecks", index=False, startrow=6 + len(hc["duplicates"]) + 3)
+        hc["bad_price"].to_excel(writer, sheet_name="HealthChecks", index=False, startrow=6 + len(hc["duplicates"]) + 3 + len(hc["missing"]) + 3)
+
+        # TopMovers
+        packs["topmovers"].to_excel(writer, sheet_name="TopMovers", index=False)
+        ws_tm = writer.sheets["TopMovers"]
+        ws_tm.freeze_panes(1, 0)
+        ws_tm.autofilter(0, 0, len(packs["topmovers"]), packs["topmovers"].shape[1] - 1)
+
+        # MomentumVol
+        packs["momentum_vol"].to_excel(writer, sheet_name="MomentumVol", index=False)
+        ws_mv = writer.sheets["MomentumVol"]
+        ws_mv.freeze_panes(1, 0)
+        ws_mv.autofilter(0, 0, len(packs["momentum_vol"]), packs["momentum_vol"].shape[1] - 1)
+
+        # Liquidity
+        packs["liquidity"].to_excel(writer, sheet_name="Liquidity", index=False)
+        ws_lq = writer.sheets["Liquidity"]
+        ws_lq.freeze_panes(1, 0)
+        ws_lq.autofilter(0, 0, len(packs["liquidity"]), packs["liquidity"].shape[1] - 1)
+
+        # BoardStats
+        if packs.get("board_stats") is not None:
+            packs["board_stats"].to_excel(writer, sheet_name="BoardStats", index=False)
+            ws_bs = writer.sheets["BoardStats"]
+            ws_bs.freeze_panes(1, 0)
+            ws_bs.autofilter(0, 0, len(packs["board_stats"]), packs["board_stats"].shape[1] - 1)
+
+            if with_charts:
+                rows = len(packs["board_stats"])
+                chart = wb.add_chart({"type": "column"})
+                # Assume columns: A=board, B=cnt, C=avg_ret_20d, D=avg_ret_ytd, E=med_vol_20d, F=sum_amt
+                chart.add_series(
+                    {
+                        "name": "Avg 20D Return",
+                        "categories": f"=BoardStats!$A$2:$A${rows+1}",
+                        "values": f"=BoardStats!$C$2:$C${rows+1}",
+                    }
+                )
+                chart.set_title({"name": "Board Avg 20D Return"})
+                chart.set_y_axis({"num_format": "0.00%"})
+                ws_bs.insert_chart("H2", chart, {"x_scale": 1.2, "y_scale": 1.2})
+
+        # Detail sheets
+        for sym in detail_syms:
+            sub = latest[latest["symbol"] == sym].copy()
+            if sub.empty:
+                continue
+            sh = f"detail_{sym}"
+            sub.to_excel(writer, sheet_name=sh, index=False)
+            ws = writer.sheets[sh]
+            ws.freeze_panes(1, 0)
+            ws.autofilter(0, 0, len(sub), sub.shape[1] - 1)
+
+        # Set a reasonable default width for all sheets
+        for name, ws in writer.sheets.items():
+            try:
+                ws.set_column(0, 0, 12)  # date or first col
+                ws.set_column(1, 20, 12)
+            except Exception:
+                pass
+
+    info(f"完成：{out_path}")
+
+
+def read_board_map(path: str | None) -> pd.DataFrame | None:
+    if not path:
+        return None
+    if not os.path.exists(path):
+        warn(f"找不到 board 對照表：{path}，將略過板塊彙總。")
+        return None
+    try:
+        map_df = pd.read_csv(path, dtype={"symbol": str, "board": str})
+        map_df["symbol"] = map_df["symbol"].astype(str).str.strip()
+        map_df["board"] = map_df["board"].fillna("Unknown")
+        return map_df[["symbol", "board"]].drop_duplicates()
+    except Exception as e:
+        warn(f"讀取 board 對照表失敗：{e}，將略過板塊彙總。")
+        return None
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Market all-in-one Excel report")
+    parser.add_argument("--file", required=True, help="合併後的 parquet 檔 (有 date/open/high/low/close/adj_close/volume/symbol)")
+    parser.add_argument("--board-csv", default=None, help="symbol → board 對照表 CSV（欄位: symbol,board）")
+    parser.add_argument("--detail-sample", default="", help="明細頁的樣本清單，用逗號分隔，例如 2330.TW,2317.TW,1101.TW")
+    parser.add_argument("--topn", type=int, default=50, help="TopMovers 顯示筆數")
+    parser.add_argument("--with-charts", action="store_true", help="在 BoardStats 放一張簡單圖表")
+    parser.add_argument("--out", required=True, help="輸出 Excel 路徑")
+    args = parser.parse_args()
+
+    try:
+        df = read_df(args.file)
+    except Exception as e:
+        error(str(e))
+        sys.exit(1)
+
+    info(f"股票數: {df['symbol'].nunique()}, 總筆數: {len(df)}, 期間: {df['date'].min().date()} → {df['date'].max().date()}")
+
+    latest = compute_indicators(df)
+
+    # Board map (optional)
+    map_df = read_board_map(args.board_csv)
+
+    packs = make_summary(latest, map_df, args.topn)
+
+    detail_syms = [s.strip() for s in args.detail_sample.split(",") if s.strip()]
+
+    write_excel(args.out, latest, packs, detail_syms, with_charts=args.with_charts)
+
+
+if __name__ == "__main__":
+    # Silence future warnings to keep console clean, logic is robust anyway.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        main()

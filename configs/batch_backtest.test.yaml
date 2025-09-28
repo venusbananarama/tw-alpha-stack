@@ -1,0 +1,10 @@
+# 測試用：只跑一組因子組合，驗證自動報表是否會生成
+combos:
+  - factors:
+      - ["composite_score"]     # 只用一個因子
+    weights:
+      - null                   # 等權
+    combine: zscore_mean
+    grid:
+      topN: [30]               # 只測 TopN=30
+      fees_bps: [2.5]          # 只測 手續費 2.5 bps

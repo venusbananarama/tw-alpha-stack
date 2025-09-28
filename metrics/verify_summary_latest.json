@@ -1,0 +1,42 @@
+{
+  "status": "PASS_NOOP",
+  "reason": "api_empty",
+  "noop": true,
+  "rows": null,
+  "landing": {
+    "prices": "C:\\AI\\tw-alpha-stack\\datahub\\silver\\alpha\\prices",
+    "chip": "C:\\AI\\tw-alpha-stack\\datahub\\silver\\alpha\\chip"
+  },
+  "results": {
+    "single": {
+      "csv": null,
+      "parquetFiles": [],
+      "rows": null,
+      "passReason": "api_empty"
+    }
+  },
+  "meta": {
+    "cmd": [
+      "C:\\AI\\tw-alpha-stack\\.venv\\Scripts\\python.exe",
+      "-X",
+      "utf8",
+      "C:\\AI\\tw-alpha-stack\\scripts\\finmind_backfill.py",
+      "--start",
+      "2025-09-26",
+      "--end",
+      "2025-09-26",
+      "--symbols",
+      "2330",
+      "--datasets",
+      "TaiwanStockPrice",
+      "TaiwanStockInstitutionalInvestorsBuySell",
+      "--workers",
+      "6",
+      "--qps",
+      "1.6"
+    ],
+    "stdout_tail": "=== FinMind Backfill (API, Phase-oriented, SENTINEL-safe) ===\nStart=2025-09-26 End=2025-09-26 Universe=TSE\nDatasets=prices,chip\nMode=單股 指定 1 檔\nNote: Symbols from CLI: 1\nWorkers=6 QPS=1.583 HourlyCap=6000 EstCalls=2\n== Phase 2: Single-stock datasets ==\n=== Backfill Done ===  metrics: C:\\AI\\tw-alpha-stack\\metrics\\ingest_summary_20250927-181030_finmind.csv\n",
+    "stderr_tail": "",
+    "log": "C:\\AI\\tw-alpha-stack\\logs\\finmind_v63_20250928-021030.log"
+  }
+}

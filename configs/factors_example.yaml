@@ -1,0 +1,11 @@
+
+# Which factors to compute and how to weight them in a composite score.
+# Positive weight means "higher is better".
+# For volatility we typically want "lower is better", so we give a negative weight.
+factors:
+  mom_252_21: 1.0      # 12M momentum skipping last 1M (252 trading days, skip 21)
+  vol_20: -0.5         # 20D realized volatility (negative weight => prefer lower vol)
+  liq_20: 0.3          # 20D average log dollar volume
+zscore_clip: 5.0       # Clip cross-sectional z-scores to +/- this value
+neutralize_by: null    # (optional) "board" to neutralize within board; requires board csv merge first
+output_columns: ["date","symbol","ret","mom_252_21","vol_20","liq_20","composite_score"]

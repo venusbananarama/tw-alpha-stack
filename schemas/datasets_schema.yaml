@@ -1,0 +1,57 @@
+version: 1
+description: >
+  AlphaCity DataHub silver/alpha 層嚴謹版 Schema。
+  允許額外欄位存在；在 --strict 模式下才檢查 required 欄位的 NA 數量。
+  dtype 檢查支援多種等價型別（如 datetime64[ns] 與 datetime64[ns, UTC]）。
+
+allow_extra_columns: true
+
+# 最小必備欄位（盡量通用，避免各資料集過度綁定）
+required_columns:
+  - date
+  - symbol
+
+# 常見可選欄位（出現就檢型別，不出現就忽略）
+optional_columns:
+  - yyyymm
+  - dataset
+  - ingested_at
+  - date_id
+
+# 欄位型別白名單（any_of 代表其中任一型別即視為通過）
+column_types:
+  date:
+    any_of: ["datetime64[ns]", "datetime64[ns, UTC]"]
+  symbol:
+    any_of: ["string", "string[python]", "object"]
+  volume:
+    any_of: ["int64", "Int64"]        # Int64 = pandas 可空整數
+  chip:
+    any_of: ["int64", "Int64"]
+  open:
+    any_of: ["float64", "float32"]
+  high:
+    any_of: ["float64", "float32"]
+  low:
+    any_of: ["float64", "float32"]
+  close:
+    any_of: ["float64", "float32"]
+  ret:
+    any_of: ["float64", "float32"]
+
+# 掃描範圍（相對於 --datahub-root）
+paths:
+  - name: prices
+    glob: "silver/alpha/prices/**/*.parquet"
+  - name: chip
+    glob: "silver/alpha/chip/**/*.parquet"
+  # 需要時可自行擴充其它資料集
+
+dividend:
+  types:
+    symbol: string
+    announce_date: date32[day]
+per:
+  types:
+    symbol: string
+    date: date32[day]

@@ -1,0 +1,1 @@
+# CODEX_PATCH_fix6.md — Update Codex PASS rules to `via rows/landing/noop` and options flags.

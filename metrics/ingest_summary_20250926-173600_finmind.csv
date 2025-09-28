@@ -1,0 +1,3 @@
+phase,dataset,symbol,start,end,rows,files,status,elapsed
+stock,prices,2330.TW,2025-09-26,2025-09-26,45298,1,OK,3.045
+stock,chip,2330.TW,2025-09-26,2025-09-26,102480,1,OK,3.541

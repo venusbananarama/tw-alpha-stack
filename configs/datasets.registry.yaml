@@ -1,0 +1,5 @@
+datasets:
+  prices:   {endpoint: TaiwanStockPrice,                          scope: single, silver_dir: prices,   key: [symbol,date]}
+  chip:     {endpoint: TaiwanStockInstitutionalInvestorsBuySell,  scope: single, silver_dir: chip,     key: [symbol,date]}
+  dividend: {endpoint: TaiwanStockDividend,                       scope: single, silver_dir: dividend, key: [symbol,announce_date]}
+  per:      {endpoint: TaiwanStockPER,                            scope: single, silver_dir: per,      key: [symbol,date]}

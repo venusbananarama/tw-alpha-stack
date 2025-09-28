@@ -1,0 +1,7 @@
+peers:
+  - code: "FUND_A"
+    fee_total_expense_ratio: 1.6
+    nav_source: "data/peers/FUND_A_nav.csv"
+  - code: "FUND_B"
+    fee_total_expense_ratio: 1.2
+    nav_source: "data/peers/FUND_B_nav.csv"

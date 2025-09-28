@@ -1,0 +1,7 @@
+# AlphaCity canonical layout additions
+_archive/
+_audit/
+reports/_migrated_from_data/
+reports/tmp/
+logs/
+state/

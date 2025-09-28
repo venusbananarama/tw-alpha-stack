@@ -1,0 +1,11 @@
+{
+  "status": "pass-with-skip",
+  "checks": {
+    "asof_fundamentals": "SKIP (no fundamentals in datahub)",
+    "silver_schema": "OK",
+    "weekly_anchor": "OK"
+  },
+  "created_at": "2025-09-28T04:23:15",
+  "stage": "phase1",
+  "notes": "等有 fundamentals(如 Dividend/PER) 進庫後，再跑 as-of 檢查。"
+}

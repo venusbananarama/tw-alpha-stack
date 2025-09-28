@@ -1,0 +1,148 @@
+# Invoke-AlphaVerification.ps1
+#
+# A unified verification script for the Fatai Alpha data pipeline.  This script
+# runs both the full‐market and single‐stock data fetches via the unified
+# wrappers (Invoke-FMAll.ps1 and Invoke-FMSingle.ps1), then scans the
+# resulting metrics files to confirm that:
+#   1. The full‐market fetch for prices (TaiwanStockPrice) uses a single
+#      aggregated call (calls ≤ 3) with no errors and non‑zero rows.
+#   2. The single‐stock fetch returns non‑zero rows and zero errors for
+#      both price and chip datasets.
+#   3. Recent parquet files exist and are readable.
+#
+# Usage:
+#   .\scripts\ps\Invoke-AlphaVerification.ps1
+#
+# Optional parameters allow you to adjust the symbol used for the single
+# stock test and the lookback window for that fetch.  By default it
+# downloads five days of data for symbol 2330.
+
+param(
+    # Number of days to fetch for the single‑stock test
+    [int]$LookbackDays = 5,
+    # Stock symbol (with optional .TW suffix) used in the single‑stock test
+    [string]$TestSymbol = '2330.TW'
+)
+
+function Resolve-AbsolutePath {
+    param([string]$Path)
+    return (Resolve-Path $Path).ProviderPath
+}
+
+# 1. Run full market test (prices only)
+Write-Output "[INFO] Running full-market test (prices dataset)..."
+& .\scripts\ps\Invoke-FMAll.ps1 `
+  -Start '2015-01-01' `
+  -End (Get-Date).ToString('yyyy-MM-dd') `
+  -Datasets @('prices') `
+  -Universe 'TSE' `
+  -Workers 6 `
+  -Qps 1.6 `
+  -VerboseCmd
+
+# 2. Run single stock test (prices and chip for the last N days)
+Write-Output "[INFO] Running single-stock test on $TestSymbol for last $LookbackDays days..."
+$startSingle = (Get-Date).AddDays(-$LookbackDays).ToString('yyyy-MM-dd')
+$endSingle   = (Get-Date).ToString('yyyy-MM-dd')
+& .\scripts\ps\Invoke-FMSingle.ps1 `
+  -Start $startSingle `
+  -End $endSingle `
+  -Symbol $TestSymbol `
+  -Datasets @('prices','chip') `
+  -Workers 2 `
+  -Qps 1.0 `
+  -VerboseCmd
+
+# 3. Helper functions to extract metrics
+function Get-LatestMetricsWithPrices {
+    $files = Get-ChildItem .\metrics\ingest_summary_* | Sort-Object LastWriteTime -Desc
+    foreach($f in $files){
+        try {
+            $df = Import-Csv $f.FullName -ErrorAction Stop
+        } catch {
+            continue
+        }
+        $hasPrices = $df | Where-Object { $_.dataset -match 'TaiwanStockPrice|prices' }
+        if($hasPrices){ return [pscustomobject]@{ File=$f; Data=$df } }
+    }
+    return $null
+}
+
+function Summarize-FullMarket {
+    param([pscustomobject]$Metrics)
+    $df  = $Metrics.Data
+    $px  = $df | Where-Object { $_.dataset -match 'TaiwanStockPrice|prices' }
+    $calls = ($px | % { [int]$_.calls } | Measure-Object -Sum).Sum
+    $errors = ($px | % { [int]$_.errors } | Measure-Object -Sum).Sum
+    $rows   = ($px | % { [int]$_.rows } | Measure-Object -Sum).Sum
+    [pscustomobject]@{
+        File    = $Metrics.File.Name
+        Calls   = $calls
+        Errors  = $errors
+        Rows    = $rows
+        PASS    = ($calls -le 3 -and $errors -eq 0 -and $rows -gt 0)
+    }
+}
+
+function Summarize-SingleStock {
+    param([pscustomobject]$Metrics)
+    $df  = $Metrics.Data
+    $ds  = $df | Where-Object { $_.dataset -match 'TaiwanStockPrice|prices|chip' }
+    $errors = ($ds | % { [int]$_.errors } | Measure-Object -Sum).Sum
+    $rows   = ($ds | % { [int]$_.rows }   | Measure-Object -Sum).Sum
+    # If there's a symbols column, verify it has a non-empty value
+    $symColExists = ($df | Get-Member -Name symbols -ErrorAction SilentlyContinue) -ne $null
+    $hasSymVal    = $false
+    if($symColExists) {
+        $hasSymVal = $df.symbols | Where-Object { $_ -and $_.Trim() -ne '' } | Select-Object -First 1
+    }
+    [pscustomobject]@{
+        File      = $Metrics.File.Name
+        HasSymbol = [bool]$hasSymVal
+        Errors    = $errors
+        Rows      = $rows
+        PASS      = ($errors -eq 0 -and $rows -gt 0 -and ( -not $symColExists -or $hasSymVal ))
+    }
+}
+
+# 4. Locate metrics and evaluate
+Write-Output "[INFO] Evaluating latest metrics..."
+# a) full market summary
+$fullMetrics = Get-LatestMetricsWithPrices
+if(-not $fullMetrics){
+    Write-Warning "No metrics file with prices found. Full-market verification cannot proceed."
+    $fullResult = $null
+} else {
+    $fullResult = Summarize-FullMarket -Metrics $fullMetrics
+}
+
+# b) single stock summary
+$singleMetrics = Get-LatestMetricsWithPrices
+if(-not $singleMetrics){
+    Write-Warning "No metrics file with prices found. Single-stock verification cannot proceed."
+    $singleResult = $null
+} else {
+    $singleResult = Summarize-SingleStock -Metrics $singleMetrics
+}
+
+# 5. Report results
+if($fullResult){
+    Write-Output "-- Full Market --"
+    $fullResult | Format-List
+} else {
+    Write-Output "-- Full Market -- (no result)"
+}
+
+if($singleResult){
+    Write-Output "-- Single Stock --"
+    $singleResult | Format-List
+} else {
+    Write-Output "-- Single Stock -- (no result)"
+}
+
+# 6. Recent parquet files
+Write-Output "-- Recent Parquet Files --"
+Get-ChildItem .\datahub\silver\alpha -Recurse -Filter *.parquet |
+  Sort-Object LastWriteTime -Desc |
+  Select-Object -First 10 |
+  Format-Table LastWriteTime, FullName -Auto

@@ -1,0 +1,9 @@
+numpy==2.2.2
+pandas==2.2.3
+numba==2.2.3
+llvmlite==2.2.3
+bottleneck==2.2.3
+pyarrow==17.0.0
+vectorbt==17.0.0
+pandas-ta==17.0.0
+TA-Lib==17.0.0

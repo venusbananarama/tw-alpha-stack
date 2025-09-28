@@ -1,0 +1,15 @@
+# 台股市場設定（可擴充）
+trading_calendar:
+  # 僅示意：實作請整合實際交易日或用 exchange-calendars
+  tz: Asia/Taipei
+fees:
+  commission_bps: 2.5      # 手續費（每邊、以萬分比估）
+  tax_bps: 30.0            # 證交稅（賣出）
+slippage:
+  mode: simple             # simple | atr | depth
+  simple_bps: 5.0
+limits:
+  limit_up_down: true      # 漲跌停約束
+  limit_pct: 0.10          # 10% 漲跌幅示意（實務請按類股規則）
+order:
+  default: IOC             # IOC/FOK/LIMIT 市場模擬

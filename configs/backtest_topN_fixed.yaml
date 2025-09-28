@@ -1,0 +1,10 @@
+topN: 50
+rebalance: M
+fees: 0.0005
+slippage: 0.0005
+delay: 1
+start: "2015-01-01"
+end:   "2020-12-31"
+factor: composite_score
+price_col: ret
+

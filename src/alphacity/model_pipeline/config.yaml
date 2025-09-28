@@ -1,0 +1,39 @@
+# === Model Pipeline Config (edit paths if needed) ===
+data:
+  merged_parquet: "G:\\AI\\datahub\\ohlcv_daily_all.parquet"
+  # Optional: board mapping for group summaries (not required for the model)
+  board_csv: "G:\\AI\\datahub\\metadata\\symbol_board.csv"
+
+universe:
+  min_history_days: 252          # only keep symbols with >= 1 trading year of data
+  min_avg_dollar_volume: 1.0e7   # filter illiquid names (close * volume)
+  start_date: "2008-01-01"       # cut early tails
+  end_date: null                 # keep all til latest
+
+features:
+  returns_windows: [1, 5, 20]
+  rolling_mean_windows: [5, 20, 60]
+  rolling_std_windows: [5, 20, 60]
+  rsi_window: 14
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+
+labels:
+  forward_return_days: 5         # target = next 5-day return
+  cls_quantile: 0.2              # top/bottom 20% for classification labels per day
+
+split:
+  train_end: "2022-12-30"        # everything <= this date is training; > is test
+
+backtest:
+  use_prediction: true           # rank by model predictions; if false, rank by 'mom_20'
+  factor_column: "mom_20"        # fallback factor when not using prediction
+  top_n: 100                     # number of long positions
+  long_only: true
+  rebalance_freq: "W-FRI"        # "D" | "W-FRI" | "M"
+  transaction_cost_bps: 5        # cost rate in basis points applied on dollar turnover
+
+report:
+  out_dir: "G:\\AI\\datahub\\reports"
+  xlsx_name: "model_all_in_one.xlsx"
