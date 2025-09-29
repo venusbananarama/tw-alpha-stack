@@ -1,0 +1,55 @@
+meta:
+  project: AlphaCity
+  profile: v4X
+  data_ver: ">=2025-09-26"
+  created_at: "2025-09-29"
+
+costs_capacity:
+  fee_bps: 8
+  tax_bps: 30
+  slip_bps_default: 10
+  impact_model: "square_root"
+  capacity:
+    max_weight_pct: 5
+    max_adv_participation: 5
+
+walk_forward:
+  anchors: "W-FRI"
+  windows: ["36w","24w","12w"]
+  pass_ratio_min: 0.70
+
+acceptance_after_costs:
+  sharpe_min: 1.5
+  maxdd_max: 0.15
+  turnover_annual_max: 5.0
+  dsr_min: 0.0
+  psr_min: 0.9
+  t_stat_min: 2.0
+  leverage_max: 1.3
+  leverage_guard_in_dd_in_sample_max: 0.15
+
+alpha_quality:
+  rank_ic_weekly_min: 0.03
+  ic_by_regime_nonnegative: true
+  orthogonalization_corr_abs_max: 0.7
+
+regime:
+  required: ["trend_up","vol_up","liq_up"]
+  report_by_regime: true
+
+execution_checks:
+  replay_mae_bps_max: 2
+  backtest_vs_replay_match_min: 0.99
+
+live_controls:
+  killswitch:
+    drawdown_warn: -0.10
+    drawdown_stop: -0.15
+
+fast_track_overrides:
+  enabled: false
+  acceptance_after_costs:
+    sharpe_min: 1.8
+    maxdd_max: 0.20
+  walk_forward:
+    pass_ratio_min: 0.80
