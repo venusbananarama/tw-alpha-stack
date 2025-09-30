@@ -1,0 +1,16 @@
+*** Begin Patch
+*** Update File: scripts/wf_runner.py
+@@
+-# TODO: 原有彙總與列印結果
++# 引入 Gate（gptcodex 補丁）
++from pathlib import Path
++import yaml, json
++from scripts.wf_gate_helper import apply_gate, print_gate_result
++
++rules = yaml.safe_load(Path("configs/rules.yaml").read_text(encoding="utf-8"))
++gate = apply_gate(df_results, rules)  # df_results 為你現有的彙總 DataFrame
++print_gate_result(gate)
++
++import sys
++sys.exit(0 if gate["ok"] else 2)
+*** End Patch

@@ -1,0 +1,12 @@
+*** Begin Patch
+*** Update File: tools/Run-SmokeTests.ps1
+@@
++$r = Join-Path $PSScriptRoot "..\configs\rules.yaml"
++if (-not (Test-Path $r)) { throw "configs/rules.yaml not found" }
++$hash = (Get-FileHash -Path $r -Algorithm SHA256).Hash.Substring(0,12)
++Write-Host ("[SSOT] rules.yaml hash={0}" -f $hash)
++
++$py = Join-Path $PSScriptRoot "..\.venv\Scripts\python.exe"
++if (-not (Test-Path $py)) { $py = "python" }
++& $py -X utf8 ".\scripts\preflight_check.py"
+*** End Patch
