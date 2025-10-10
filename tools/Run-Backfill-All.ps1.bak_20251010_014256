@@ -1,0 +1,474 @@
+<# =====================================================================
+Run-Backfill-All.ps1 (Strict Edition, w/ Smoke)
+AlphaCity · 一鍵：回補至最新(expect_date) → Preflight →（可選）WF→Gate → 快照
+
+模式：
+  (A) 連續回補（預設）：from = max_date+1 .. < expect_date
+  (B) -FillGaps：逐日檢查銀層，只補缺口；支援 -Start/-End 視窗（End 不含）
+  (C) -Smoke：最小測試（T0=expect_date-1；prices/chip 單股、dividend/PER 全市場）後「早退」
+
+相容：保留 -SkipWF/-SkipGate；新增 -Symbols/-SymbolsFile/-DataHubRoot/-ReportDir 等。
+代號六：PowerShell 內嚴禁 bash heredoc/重導；臨時 Python 一律用暫存 .py。
+===================================================================== #>
+
+[CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Medium')]
+param(
+  # 基本路徑
+  [Parameter()][ValidateNotNullOrEmpty()][string]$RootPath    = 'C:\AI\tw-alpha-stack',
+  [Parameter()][ValidateNotNullOrEmpty()][string]$DataHubRoot,
+  [Parameter()][ValidateNotNullOrEmpty()][string]$ReportDir,
+
+  # 回補模式與視窗
+  [Parameter()][switch]$FillGaps,
+  [Parameter()][string]$Start,
+  [Parameter()][string]$End,
+
+  # Smoke 最小測試
+  [Parameter()][switch]$Smoke,                 # 只做最小測試後結束（不跑 WF/Gate）
+  [Parameter()][string]$SmokeStart,            # 指定 smoke 的當日（yyyy-MM-dd），預設 auto=T0
+  [Parameter()][string[]]$SmokeSymbols,        # 覆寫 smoke 的單股清單，預設 2330/2317
+
+  # 重試與節流
+  [Parameter()][ValidateRange(0,20)][int]$MaxRetries = 6,
+  [Parameter()][int]$ThrottleRPM,   # 覆寫 FINMIND_THROTTLE_RPM
+  [Parameter()][int]$BatchSize,     # 覆寫 FINMIND_BATCH
+
+  # 投資池/標的（Symbols 支援空白或逗號分隔）
+  [Parameter()][string[]]$Symbols,
+  [Parameter()][string]$SymbolsFile,
+
+  # 流程開關（向後相容）
+  [Parameter()][Alias('NoWF')][switch]$SkipWF,
+  [Parameter()][Alias('NoGate')][switch]$SkipGate,
+  [Parameter()][switch]$NoPreflight,
+  [Parameter()][switch]$NoPostflight,
+
+  # 其他
+  [Parameter()][string]$PythonPath,     # 若不指定，使用 .venv\Scripts\python.exe
+  [Parameter()][switch]$AllowConcurrent,
+  [Parameter()][string]$LogPath
+)
+
+# -------------------- 安全/嚴格設定 --------------------
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$ProgressPreference    = 'SilentlyContinue'
+function Fail($msg){ throw $msg }
+
+# -------------------- 目錄與路徑 --------------------
+if (-not (Test-Path $RootPath)) { Fail "RootPath not found: $RootPath" }
+Set-Location $RootPath
+$ResolvedRoot = (Resolve-Path '.').Path
+
+if (-not $DataHubRoot) { $DataHubRoot = Join-Path $ResolvedRoot 'datahub' }
+if (-not $ReportDir)   { $ReportDir   = Join-Path $ResolvedRoot 'reports' }
+New-Item -ItemType Directory -Force -Path $ReportDir, (Join-Path $ReportDir 'logs'), (Join-Path $ReportDir 'history') | Out-Null
+
+# -------------------- Transcript / 鎖檔 --------------------
+$ts      = Get-Date -Format 'yyyyMMdd_HHmmss'
+if (-not $LogPath) { $LogPath = Join-Path $ReportDir ("logs\Run-Backfill-All_{0}.log" -f $ts) }
+$LockDir = Join-Path $ReportDir 'locks'
+$Lock    = Join-Path $LockDir  'Run-Backfill-All.lock'
+New-Item -ItemType Directory -Force -Path $LockDir | Out-Null
+
+# -------------------- UTF-8 與 Python --------------------
+try { chcp 65001 > $null 2>&1 } catch {}
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+$env:PYTHONIOENCODING = 'utf-8'
+$env:PYTHONUTF8       = '1'
+
+if (-not $env:ALPHACITY_ALLOW) { $env:ALPHACITY_ALLOW = '1' }
+
+$PY = if ($PythonPath) { $PythonPath } else { Join-Path $ResolvedRoot '.venv\Scripts\python.exe' }
+if (-not (Test-Path $PY)) { Fail "找不到 Python venv：$PY" }
+
+# -------------------- FinMind 金鑰與端點 --------------------
+if (-not $env:FINMIND_TOKEN) { Fail 'FINMIND_TOKEN 未設定（必填）' }
+$env:FINMIND_TOKEN  = $env:FINMIND_TOKEN.Trim()
+$env:FINMIND_BEARER = "Bearer $($env:FINMIND_TOKEN)"
+if (-not $env:FINMIND_BASE_URL -or [string]::IsNullOrWhiteSpace($env:FINMIND_BASE_URL)) {
+  $env:FINMIND_BASE_URL = 'https://api.finmindtrade.com/api/v4/data'
+}
+$env:FINMIND_BASE_URL = ($env:FINMIND_BASE_URL -replace '[^\x20-\x7E]', '').Trim('"').Trim()
+$__tmpUri = $null
+if (-not [Uri]::TryCreate("$($env:FINMIND_BASE_URL)?dataset=TaiwanStockPrice&start_date=2025-01-01&end_date=2025-01-02",[UriKind]::Absolute,[ref]$__tmpUri)) {
+  Fail "FINMIND_BASE_URL 無效：$($env:FINMIND_BASE_URL)"
+}
+
+# 節流（可被參數覆寫）
+if ($ThrottleRPM) { $env:FINMIND_THROTTLE_RPM = "$ThrottleRPM" }
+if (-not $env:FINMIND_THROTTLE_RPM) { $env:FINMIND_THROTTLE_RPM = '48' }
+if ($BatchSize)   { $env:FINMIND_BATCH = "$BatchSize" }
+if (-not $env:FINMIND_BATCH)        { $env:FINMIND_BATCH = '400' }
+
+# -------------------- 路徑/檔案 --------------------
+$Rules     = Join-Path $ResolvedRoot 'rules.yaml'
+$Preflight = Join-Path $ResolvedRoot 'scripts\preflight_check.py'
+if (-not (Test-Path $Rules))     { Fail "找不到 rules.yaml：$Rules" }
+if (-not (Test-Path $Preflight)) { Fail "找不到 preflight_check.py：$Preflight" }
+
+# -------------------- 工具函式（代號六 OK：暫存 .py） --------------------
+function To-Date {
+  param([string]$s,[string]$Name='value')
+  if ([string]::IsNullOrWhiteSpace($s)) { throw "[$Name] is empty; require yyyy-MM-dd" }
+  $s = $s.Trim()
+  $dt = $null
+  if (-not [datetime]::TryParse($s, [ref]$dt)) { throw "[$Name] invalid date: '$s'" }
+  $dt.Date
+}
+function Format-Date([datetime]$dt){ $dt.ToString('yyyy-MM-dd') }
+function NextDayStr([string]$s,[string]$Name='value'){
+  if ([string]::IsNullOrWhiteSpace($s)) { return $null }
+  $d = To-Date -s $s -Name $Name
+  Format-Date ($d.AddDays(1))
+}
+function Get-Stopwatch(){ [System.Diagnostics.Stopwatch]::StartNew() }
+function Get-WaitSecondsToNextHour {
+  $now  = Get-Date
+  $next = $now.Date.AddHours($now.Hour + 1)
+  [int][Math]::Ceiling(($next - $now).TotalSeconds) + 5
+}
+function Invoke-WithSmartRetry {
+  param([scriptblock]$Action,[int]$MaxRetries=6,[string]$Name='task')
+  $attempt=0; $delay=10
+  while ($true) {
+    try { & $Action; return } catch {
+      $attempt++; $msg = ($_ | Out-String)
+      if ($msg -match '(^|[^0-9])402([^0-9]|$)' -or $msg -match 'Payment\s*Required') {
+        $wait = Get-WaitSecondsToNextHour
+        Write-Warning ("[{0}] HTTP 402：等待至下一整點（{1} 秒）" -f $Name,$wait)
+        Start-Sleep -Seconds $wait; continue
+      }
+      if ($attempt -gt $MaxRetries) { throw "Failed $Name after $MaxRetries retries: $msg" }
+      $jitter = Get-Random -Minimum 0 -Maximum 3
+      Write-Warning ("[{0}] 失敗第 {1}/{2} 次：{3}；{4}s 後重試" -f $Name,$attempt,$MaxRetries,$_.Exception.Message,($delay+$jitter))
+      Start-Sleep -Seconds ($delay + $jitter); $delay = [Math]::Min($delay*2,120)
+    }
+  }
+}
+
+# Symbols 正規化（空白/逗號→拆成多個；去 .TW）
+function Normalize-Symbols {
+  param([string[]]$List)
+  if (-not $List) { return @() }
+  $out = @()
+  foreach ($item in $List) {
+    if ([string]::IsNullOrWhiteSpace($item)) { continue }
+    $parts = ($item -split '[,\s]+' | Where-Object { $_ -ne '' })
+    foreach ($p in $parts) {
+      $q = ($p -replace '\.TW$','').Trim()
+      if ($q -match '^\d{4}$') { $out += $q }
+    }
+  }
+  return ($out | Sort-Object -Unique)
+}
+
+function Get-UniverseSymbols {
+  param([string]$PathHint='', [string[]]$Explicit=@(), [string]$File='')
+  $Explicit = Normalize-Symbols -List $Explicit
+  if ($Explicit -and $Explicit.Count -gt 0) { return $Explicit }
+  if ($File -and (Test-Path $File)) { $PathHint = $File }
+  $candidates = @($PathHint, '.\configs\investable_universe.txt', '.\universe.tw_all.txt') | Where-Object { $_ -and (Test-Path $_) }
+  $file = $candidates | Select-Object -First 1
+  if (-not $file) { return @() }
+  (Get-Content $file) | ForEach-Object { ($_ -replace '\s','') -replace '\.TW$','' } | Where-Object { $_ -match '^\d{4}$' } | Sort-Object -Unique
+}
+
+function Split-IntoChunks { param([array]$arr,[int]$size=400) if (-not $arr -or $arr.Count -eq 0) { return @() } ; for ($i=0;$i -lt $arr.Count;$i+=$size){ ,($arr[$i..([math]::Min($i+$size-1,$arr.Count-1))]) } }
+
+# 兼容 preflight 各種 shape，抽出 prices/chip/per/dividend 最新日
+function Resolve-Freshness {
+  param($pf)
+  $res = [ordered]@{ prices=$null; chip=$null; per=$null; dividend=$null }
+  $f = $pf.freshness; if ($null -eq $f) { return [pscustomobject]$res }
+  function norm($s){ ($s -replace '[^a-z0-9]', '').ToLower() }
+  $map = @{
+    prices   = @('prices','price','stockprice','taiwanstockprice','alphaprices')
+    chip     = @('chip','institutional','buysell','taiwanstockinstitutionalinvestorsbuysell','threeinstitutional')
+    per      = @('per','pe','priceearnings','taiwanstockper')
+    dividend = @('dividend','dividends','cashdividend','taiwanstockdividend')
+  }
+  function takeMax($node){
+    if ($null -eq $node) { return $null }
+    if ($node -is [string]) { return $node }
+    if ($node.PSObject.Properties['max_date']) { return $node.max_date }
+    if ($node.PSObject.Properties['maxDate'])  { return $node.maxDate }
+    if ($node.PSObject.Properties['date'])     { return $node.date }
+    return $null
+  }
+  if ($f -is [System.Collections.IDictionary] -or $f.PSObject.Properties.Count -gt 0) {
+    $keys = $f.PSObject.Properties.Name
+    foreach ($k in $keys) {
+      $nk = norm $k
+      foreach ($t in $map.Keys) {
+        if ($res[$t]) { continue }
+        foreach ($cand in $map[$t]) { if ($nk -like "*$cand*") { $res[$t] = takeMax ($f.$k); break } }
+      }
+    }
+  } elseif ($f -is [System.Collections.IEnumerable]) {
+    foreach ($row in $f) {
+      $name = $null
+      foreach ($n in @('dataset','name','kind','key','id')) { if ($row.PSObject.Properties[$n]) { $name = [string]$row.$n; break } }
+      if ($null -eq $name) { continue }
+      $nn = norm $name
+      foreach ($t in $map.Keys) {
+        if ($res[$t]) { continue }
+        foreach ($cand in $map[$t]) { if ($nn -like "*$cand*") { $res[$t] = takeMax $row; break } }
+      }
+    }
+  }
+  return [pscustomobject]$res
+}
+
+# 銀層：某日是否達到門檻（避免單筆殘留造成覆蓋假象）——代號六：暫存 .py
+function Test-DayCovered {
+  param([ValidateSet('prices','chip','per','dividend')][string]$Kind,[string]$Day,[int]$Threshold=1,[string]$Hub)
+  if (-not $Hub) { $Hub = $DataHubRoot }
+  $pyScript = @'
+import sys, os, glob, pandas as pd
+root, kind, day = sys.argv[1], sys.argv[2], sys.argv[3]
+base = os.path.join(root, 'silver', 'alpha', kind)
+cnt, mx = 0, None
+for f in glob.glob(os.path.join(base, '**', '*.parquet'), recursive=True):
+    try:
+        df = pd.read_parquet(f, columns=['date'])
+        s = df['date'].astype(str)
+        cnt += int((s == day).sum())
+        dmax = pd.to_datetime(s, errors='coerce').max()
+        if pd.notna(dmax):
+            dv = dmax.date().isoformat()
+            mx = dv if (mx is None or dv > mx) else mx
+    except Exception:
+        pass
+print(cnt if cnt else 0, mx if mx else '')
+'@
+  $tmp = Join-Path $env:TEMP ("check_day_{0}.py" -f ([guid]::NewGuid()))
+  try {
+    Set-Content -Path $tmp -Value $pyScript -Encoding UTF8
+    $raw = & $PY $tmp $Hub $Kind $Day
+    $parts = ($raw -split '\s+', 2)
+    $n = [int]$parts[0]; $mx = ($parts[1] ? $parts[1].Trim() : '')
+    if ($Threshold -lt 0) { $Threshold = 0 }
+    return [pscustomobject]@{ count=$n; max_date=$mx; pass = ($n -ge $Threshold) }
+  } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+}
+
+# 回補單一 dataset（Symbols 逐一展開到 CLI，避免合併成單 token）
+function Backfill-One {
+  param([ValidateSet('prices','chip','per','dividend')][string]$Kind,[string]$Start,[string]$End,[string[]]$Symbols)
+  $s = (Format-Date (To-Date $Start 'Start'))
+  $e = (Format-Date (To-Date $End   'End'))
+  if ((To-Date $s) -ge (To-Date $e)) { Write-Host "[Skip] $Kind up-to-date ($s .. < $e)"; return }
+
+  $dataset = switch ($Kind) { 'prices'{'TaiwanStockPrice'} 'chip'{'TaiwanStockInstitutionalInvestorsBuySell'} 'per'{'TaiwanStockPER'} 'dividend'{'TaiwanStockDividend'} }
+
+  $args = @('.\scripts\finmind_backfill.py','--datasets',$dataset,'--start',$s,'--end',$e,'--datahub-root',$DataHubRoot)
+  $symbolsNorm = Normalize-Symbols -List $Symbols
+  if ($symbolsNorm -and $symbolsNorm.Count -gt 0) { $args += '--symbols'; $args += $symbolsNorm }
+
+  $desc = ("Backfill {0}: {1} .. < {2}  (dataset={3}{4})" -f $Kind,$s,$e,$dataset, $(if($symbolsNorm){"; symbols=" + $symbolsNorm.Count}))
+  if ($PSCmdlet.ShouldProcess($desc)) {
+    Write-Host ("→ " + $desc)
+    Invoke-WithSmartRetry -Name "backfill:$Kind" -MaxRetries $MaxRetries -Action {
+      $global:LASTEXITCODE = 0
+      $output = & $PY @args 2>&1
+      if ($LASTEXITCODE -ne 0) { throw ("python exit={0}`n{1}" -f $LASTEXITCODE, ($output | Out-String)) }
+    }
+  }
+}
+
+# Preflight（前/後）
+function Run-Preflight { param([string]$Stage)
+  $name = if ($Stage -eq 'after') { 'preflight(after)' } else { 'preflight' }
+  Invoke-WithSmartRetry -Name $name -Action { & $PY '.\scripts\preflight_check.py' --rules $Rules --export $ReportDir --root '.' | Out-Null }
+  return (Get-Content (Join-Path $ReportDir 'preflight_report.json') -Raw | ConvertFrom-Json)
+}
+
+# Smoke：最小測試（T0；prices/chip 單股、dividend/PER 全市場）→ 早退
+function Invoke-Smoke {
+  param([string]$ExpectDate,[string]$DataHubRoot,[string[]]$Symbols,[string]$Start)
+  $startDay = if ($Start) { (Format-Date (To-Date $Start 'SmokeStart')) } else { (Get-Date $ExpectDate).AddDays(-1).ToString('yyyy-MM-dd') }
+  $endExcl  = (Get-Date $startDay).AddDays(1).ToString('yyyy-MM-dd')
+  $SYMS     = Normalize-Symbols -List $Symbols
+  if (-not $SYMS -or $SYMS.Count -eq 0) { $SYMS = @('2330','2317') }
+  Write-Host ("[SMOKE] window {0} .. < {1} (symbols={2})" -f $startDay,$endExcl, ($SYMS -join ' ')) -ForegroundColor Cyan
+
+  Backfill-One prices   $startDay $endExcl $SYMS
+  Backfill-One chip     $startDay $endExcl $SYMS
+  Backfill-One dividend $startDay $endExcl $null
+  Backfill-One per      $startDay $endExcl $null
+
+  $okCore = $true
+  foreach ($k in @('prices','chip','per','dividend')) {
+    $thr = if ($k -in @('prices','chip')) { 1 } else { 0 }
+    $r = Test-DayCovered -Kind $k -Day $startDay -Threshold $thr -Hub $DataHubRoot
+    $mx = if ($r.max_date) { $r.max_date } else { '(none)' }
+    $tag = if (($k -in @('prices','chip') -and $r.count -ge 1) -or ($k -in @('per','dividend'))) { 'PASS' } else { 'WARN' }
+    if ($k -in @('prices','chip') -and -not $r.pass) { $okCore = $false }
+    $fg = if ($tag -eq 'PASS') { 'Green' } else { 'Yellow' }
+    Write-Host ("[{0}] {1}  has_day={2}  max_date={3}" -f $k.ToUpper(), $tag, $r.count, $mx) -ForegroundColor $fg
+  }
+  if ($okCore) { Write-Host "SMOKE PASS (core datasets ok)." -ForegroundColor Green; return $true }
+  else         { Write-Warning "SMOKE FAIL: prices/chip 當日未落地。";            return $false }
+}
+
+# ==================== 主流程（大 try/finally，保證釋放） ====================
+$LockStream = $null
+if (-not $AllowConcurrent) {
+  try {
+    $LockStream = [System.IO.File]::Open($Lock,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::Write,[System.IO.FileShare]::None)
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes(("pid={0}; start={1:O}" -f $PID, (Get-Date)))
+    $LockStream.Write($bytes,0,$bytes.Length); $LockStream.Flush()
+  } catch { Fail "另一個 Run-Backfill-All 正在執行（鎖檔存在：$Lock）。若確定為殘留，請手動刪除後重試。" }
+}
+
+try {
+  try { Start-Transcript -Path $LogPath -Append | Out-Null } catch { Write-Warning "Start-Transcript 失敗：$($_.Exception.Message)。" }
+
+  $swAll = Get-Stopwatch
+  Write-Verbose ("RootPath        : {0}" -f $ResolvedRoot)
+  Write-Verbose ("DataHubRoot     : {0}" -f $DataHubRoot)
+  Write-Verbose ("ReportDir       : {0}" -f $ReportDir)
+  Write-Verbose ("Python          : {0}" -f $PY)
+  Write-Verbose ("FINMIND BASE_URL: {0}" -f $env:FINMIND_BASE_URL)
+  Write-Verbose ("Throttle rpm/b  : {0}/{1}" -f $env:FINMIND_THROTTLE_RPM, $env:FINMIND_BATCH)
+
+  # Preflight（前）
+  $pf1 = $null
+  if (-not $NoPreflight) {
+    $pf1 = Run-Preflight -Stage 'before'
+  } else {
+    Write-Warning "略過 Preflight（前）。"
+    if (-not (Test-Path (Join-Path $ReportDir 'preflight_report.json'))) {
+      Fail "略過 Preflight 但找不到 preflight_report.json。"
+    }
+    $pf1 = Get-Content (Join-Path $ReportDir 'preflight_report.json') -Raw | ConvertFrom-Json
+  }
+
+  # 期望視窗
+  $fx     = Resolve-Freshness $pf1
+  $Expect = $pf1.meta.expect_date
+
+  # ---- Smoke 早退 ----
+  if ($Smoke) {
+    $ok = Invoke-Smoke -ExpectDate $Expect -DataHubRoot $DataHubRoot -Symbols $SmokeSymbols -Start $SmokeStart
+    $pfS2 = Run-Preflight -Stage 'after'
+    $x1 = Resolve-Freshness $pf1; $x2 = Resolve-Freshness $pfS2
+    Write-Host ("[SMOKE freshness(before→after)] prices {0}→{1} | chip {2}→{3}" -f $x1.prices,$x2.prices,$x1.chip,$x2.chip)
+    if (-not $ok) { exit 2 } else { exit 0 }
+  }
+  # ---------------------
+
+  if (-not $Start) {
+    $Start = @(
+      NextDayStr -s $fx.prices   -Name 'prices.max_date',
+      NextDayStr -s $fx.chip     -Name 'chip.max_date',
+      NextDayStr -s $fx.per      -Name 'per.max_date',
+      NextDayStr -s $fx.dividend -Name 'dividend.max_date'
+    ) | Where-Object { $_ } | Sort-Object | Select-Object -First 1
+  }
+  if (-not $End) { $End = $Expect }
+  $Start = (Format-Date (To-Date $Start 'Start'))
+  $End   = (Format-Date (To-Date $End   'End'))
+  if ((To-Date $Start) -ge (To-Date $End)) { Fail "Invalid window: Start=$Start .. < End=$End" }
+
+  # per-dataset from（clamp 至 Start）
+  $from = [ordered]@{
+    prices   = NextDayStr $fx.prices   'prices.max_date'
+    chip     = NextDayStr $fx.chip     'chip.max_date'
+    per      = NextDayStr $fx.per      'per.max_date'
+    dividend = NextDayStr $fx.dividend 'dividend.max_date'
+  }
+  foreach ($k in @($from.Keys)) {
+    if ([string]::IsNullOrWhiteSpace($from[$k])) { $from[$k] = $Start }
+    else { $from[$k] = (Format-Date ([datetime]([System.Math]::Max((To-Date $from[$k]).Ticks,(To-Date $Start).Ticks)))) }
+  }
+
+  # 投資池（chip/per 用；若傳 Symbols/檔案則覆寫）
+  $POOL = Get-UniverseSymbols -Explicit $Symbols -File $SymbolsFile
+  if (-not $POOL -or $POOL.Count -eq 0) { $POOL = Get-UniverseSymbols }
+  $poolInfo = if ($Symbols -or $SymbolsFile) { ' (from parameters)' } else { '' }
+  Write-Host ("[AlphaCity] universe symbols: {0}{1}" -f $POOL.Count, $poolInfo)
+
+  Write-Host ("[AlphaCity] 期望窗口：Start={0} .. < End={1}（expect_date={2}）" -f $Start,$End,$Expect)
+  Write-Host ("[AlphaCity] from（逐類）：prices={0}  chip={1}  per={2}  dividend={3}" -f $from.prices,$from.chip,$from.per,$from.dividend)
+
+  # 回補
+  if ($FillGaps) {
+    Write-Host "[AlphaCity] 模式：FillGaps（僅補缺口）"
+    $th = @{ prices = 200; chip = 50; per = 50; dividend = 1 }  # 覆蓋門檻
+
+    for ($d=(To-Date $Start); $d -lt (To-Date $End); $d = $d.AddDays(1)) {
+      $day  = Format-Date $d
+      $day1 = Format-Date ($d.AddDays(1))
+      Write-Host "=== Day $day ==="
+
+      if (-not (Test-DayCovered prices   $day  $th.prices -Hub $DataHubRoot).pass) { Backfill-One prices   $day $day1 $null } else { Write-Host "✓ prices   covered (≥$($th.prices))" }
+      if (-not (Test-DayCovered dividend $day  $th.dividend -Hub $DataHubRoot).pass) { Backfill-One dividend $day $day1 $null } else { Write-Host "✓ dividend covered (≥$($th.dividend))" }
+
+      if (-not (Test-DayCovered chip $day $th.chip -Hub $DataHubRoot).pass) {
+        if ($POOL.Count -eq 0) { Backfill-One chip $day $day1 $null }
+        else { foreach ($chunk in (Split-IntoChunks -arr $POOL -size [int]$env:FINMIND_BATCH)) { Backfill-One chip $day $day1 $chunk } }
+      } else { Write-Host "✓ chip     covered (≥$($th.chip))" }
+
+      if (-not (Test-DayCovered per $day $th.per -Hub $DataHubRoot).pass) {
+        if ($POOL.Count -eq 0) { Backfill-One per $day $day1 $null }
+        else { foreach ($chunk in (Split-IntoChunks -arr $POOL -size [int]$env:FINMIND_BATCH)) { Backfill-One per $day $day1 $chunk } }
+      } else { Write-Host "✓ per      covered (≥$($th.per))" }
+    }
+  }
+  else {
+    Write-Host "[AlphaCity] 模式：連續回補（from..End，不含 End）"
+    Backfill-One prices   $from.prices   $End
+    Backfill-One dividend $from.dividend $End
+    if ($POOL.Count -gt 0) {
+      foreach ($chunk in (Split-IntoChunks -arr $POOL -size [int]$env:FINMIND_BATCH)) {
+        Backfill-One chip $from.chip $End $chunk
+        Backfill-One per  $from.per  $End $chunk
+      }
+    } else {
+      Backfill-One chip $from.chip $End $null
+      Backfill-One per  $from.per  $End $null
+    }
+  }
+
+  # Preflight（後）與快照
+  $pf2 = if (-not $NoPostflight) { Run-Preflight -Stage 'after' } else { Get-Content (Join-Path $ReportDir 'preflight_report.json') -Raw | ConvertFrom-Json }
+  $fx1 = Resolve-Freshness $pf1; $fx2 = Resolve-Freshness $pf2
+  Write-Host ("[AlphaCity] freshness(before→after): prices {0}→{1} | chip {2}→{3} | dividend {4}→{5} | per {6}→{7}" -f $fx1.prices,$fx2.prices,$fx1.chip,$fx2.chip,$fx1.dividend,$fx2.dividend,$fx1.per,$fx2.per)
+
+  # WF → Gate（可選）
+  if (-not $SkipWF) {
+    $wf = Join-Path $ResolvedRoot 'scripts\wf_runner.py'
+    if (Test-Path $wf) { Invoke-WithSmartRetry -Name 'wf_runner' -MaxRetries $MaxRetries -Action { & $PY $wf --dir '.\runs\wf_configs' --export $ReportDir } }
+    else { Write-Warning "找不到 wf_runner.py（略過 WF）。" }
+  }
+  if (-not $SkipGate) {
+    $gate = @('.\tools\Run-WFGate.ps1','.\tools\Run-PreflightAndGate.ps1') | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($gate) { $shell = (Get-Command pwsh -EA SilentlyContinue) ? 'pwsh' : 'powershell'; & $shell -NoProfile -ExecutionPolicy Bypass -File $gate }
+    else { Write-Warning "找不到 Gate 腳本（略過 Gate）。" }
+    Get-Content (Join-Path $ReportDir 'gate_summary.json') -TotalCount 120 -EA SilentlyContinue
+  }
+
+  # Snapshot
+  $uniPath  = Join-Path $ResolvedRoot 'configs\investable_universe.txt'
+  $uniLines = if (Test-Path $uniPath) { (Get-Content $uniPath | Measure-Object -Line).Lines } else { 0 }
+  $pp  = & $PY -c "import pandas,pyarrow,platform;print(platform.python_version(),pandas.__version__,pyarrow.__version__)"
+  $snap = @()
+  $snap += "[AlphaCity 快照] date=$(Get-Date -Format yyyy-MM-dd)"
+  $snap += "python/pandas/pyarrow= $pp"
+  $snap += ("freshness(before→after): prices={0}→{1}  chip={2}→{3}  dividend={4}→{5}  per={6}→{7}" -f $fx1.prices,$fx2.prices,$fx1.chip,$fx2.chip,$fx1.dividend,$fx2.dividend,$fx1.per,$fx2.per)
+  $snap += "expect_date(=T0+1): $($pf2.meta.expect_date)"
+  $snap += "FINMIND_BASE_URL: $($env:FINMIND_BASE_URL)"
+  $snap += "universe_lines=$uniLines"
+  $gateJson = Join-Path $ReportDir 'gate_summary.json'
+  if (Test-Path $gateJson) { $gs = Get-Content $gateJson -Raw | ConvertFrom-Json; if ($gs) { $snap += "wf_pass=$($gs.wf.pass_rate)  gate=$($gs.overall)" } }
+  $snapPath = Join-Path $ReportDir 'snapshot.txt'
+  $snap -join "`r`n" | Out-File -FilePath $snapPath -Encoding utf8
+  Write-Host ("✔ 完成（耗時：{0:n1}s）。已寫入 {1}" -f $swAll.Elapsed.TotalSeconds, (Resolve-Path $snapPath))
+
+} finally {
+  try { Stop-Transcript | Out-Null } catch {}
+  if ($LockStream) { $LockStream.Dispose() }
+  if (-not $AllowConcurrent) { try { Remove-Item $Lock -ErrorAction SilentlyContinue } catch {} }
+}

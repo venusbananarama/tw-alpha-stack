@@ -1,0 +1,7 @@
+{
+  "ssot_hash": "<fill-by-preflight>",
+  "data_ver": "<yyyy-mm-dd>",
+  "wf_pass_min": 0.8,
+  "leverage_cap": 1.3,
+  "notes": "Bind to SSOT hash and data version for reproducibility."
+}

@@ -1,3 +1,5 @@
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 <#  repo_tidy_v2.ps1 — AlphaCity 專案清理/歸位器（安全版，v2）
 
 用法：
@@ -212,3 +214,4 @@ Get-ChildItem -Directory -Recurse | Where-Object {
 
 Write-Host "`n完成：執行明細已輸出到 _audit/cleanup_plan.csv"
 if ($Backup) { Write-Host "已備份到：$backupRoot" }
+

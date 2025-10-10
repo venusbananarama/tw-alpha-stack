@@ -1,0 +1,541 @@
+太好了，現在狀態穩定 ✅
+先回答你的兩個問題，接著給**可直接貼用的 MD**（含所有修正、規格與指令清單）。
+
+---
+
+## 1) `Run-Backfill-All.ps1` 有 402 防呆嗎？
+
+**有。** 你目前使用的 `Run-Backfill-All.ps1 (Strict Edition)` 內建 `Invoke-WithSmartRetry`：
+
+* 偵測到 **HTTP 402 / "Payment Required"** 時，會**自動等到下一整點**再續跑（`Get-WaitSecondsToNextHour()` 計算秒數 → `Start-Sleep`）。
+* 其他錯誤採用**指數退避**（含 jitter），到 `-MaxRetries` 仍失敗才終止。
+* 這層防護在所有 `Backfill-One`（prices/chip/per/dividend）呼叫 Python 時都會啟動。
+
+此外，`finmind_backfill.py (Strict Fix)` 也支援以環境變數控制 QPS：
+
+* `$env:FINMIND_QPS`（建議 1.0 ~ 1.5）；若 402 頻繁，**降到 1.0** 或暫停一段時間再續跑。
+* `$env:FINMIND_BATCH=400`（切批），搭配**symbol-level gating** 只打缺的檔，節省配額。
+
+> 也就是：**雙層防呆**（PS 層智慧重試 + Python 層限速與按缺呼叫）。
+
+---
+
+## 2) 一份完整的 MD（可直接存檔）
+
+下面是整理好的操作手冊（Markdown）。若要直接產檔，可用最後附的 PowerShell 片段寫入 `docs/AlphaCity_Backfill_Playbook.md`。
+
+````markdown
+# AlphaCity 一鍵回補到最新（T0）— 操作手冊  
+**版本**：2025‑10‑10  
+**範圍**：TW 市場 `prices / chip / per / dividend` 從缺補齊到最新交易日（T0 = expect_date − 1）  
+**關鍵修復**：`finmind_backfill.py (Strict Fix)`、`preflight_check.py (backslash‑safe)`、銀層欄位型別正規化（per/202510）
+
+---
+
+## 0) 作業原則（代號六）
+- **一律 PowerShell**；**嚴禁**使用 bash heredoc / `<<EOF` / shell 重導語法。  
+- 需要多行 Python 時，**寫暫存 `.py`** 或使用 `python -c` 單行。  
+- 嚴格錯誤設定：`$ErrorActionPreference='Stop'`；過程中若報紅字，**優先修源頭**再重跑。
+
+---
+
+## 1) 修復摘要（根因與對策）
+- **Root cause #1：gating 誤判**  
+  舊版 `finmind_backfill.py` 只看「日期層級」覆蓋，不看 `stock_id`。只要同日別檔有資料，就誤判**所有檔**已覆蓋 → `EstCalls=0`。  
+  **對策**：Strict Fix 版改為 **symbol + day** 檢查，不足才呼叫；並新增 `--force`。
+- **Root cause #2：preflight 輸出不穩**  
+  舊版 `preflight_check.py` 不保證固定鍵名、且 f-string 反斜線易觸發例外。  
+  **對策**：backslash‑safe 版固定輸出：  
+  `freshness.prices|chip|dividend|per.max_date`（yyyy‑MM‑dd），只掃**當月+前月**，I/O 低且穩。
+- **Root cause #3：銀層欄位混型**  
+  per 分區同時存在 `date` 為 `Timestamp` 與 `str` → 排序/聚合炸。  
+  **對策**：提供正規化腳本，統一 `date='yyyy-MM-dd'`、`stock_id=str`。
+
+---
+
+## 2) 基本環境與期望日（A 段）
+```powershell
+Set-Location C:\AI\tw-alpha-stack
+$ErrorActionPreference = 'Stop'
+$env:ALPHACITY_ALLOW = '1'
+
+# FinMind 端點與限速（遇 402 可降到 1.0）
+$env:FINMIND_BASE_URL = 'https://api.finmindtrade.com/api/v4/data'
+$env:FINMIND_QPS      = '1.5'
+$env:FINMIND_THROTTLE_RPM = '48'
+$env:FINMIND_BATCH    = '400'
+
+$PY = ".\.venv\Scripts\python.exe"
+& $PY -V
+
+# 取得 expect_date 與 T0
+& $PY .\scripts\preflight_check.py --rules .\rules.yaml --export .\reports --root .
+$pre = Get-Content .\reports\preflight_report.json -Raw | ConvertFrom-Json
+$Expect = $pre.meta.expect_date
+$T0     = (Get-Date $Expect).AddDays(-1).ToString('yyyy-MM-dd')
+
+"Expect=$Expect  T0=$T0"
+"prices={0}  chip={1}  dividend={2}  per={3}" -f `
+  $pre.freshness.prices.max_date, `
+  $pre.freshness.chip.max_date, `
+  $pre.freshness.dividend.max_date, `
+  $pre.freshness.per.max_date
+````
+
+---
+
+## 3) 投資池（全市場清單）
+
+```powershell
+if (Test-Path .\configs\investable_universe.txt) {
+  $POOL = Get-Content .\configs\investable_universe.txt
+} elseif (Test-Path .\universe.tw_all.txt) {
+  $POOL = Get-Content .\universe.tw_all.txt
+} else { throw "找不到投資池清單" }
+
+$POOL = $POOL | % { ($_ -replace '\s','') -replace '\.TW$','' } |
+        ? { $_ -match '^\d{4}$' } | Sort-Object -Unique
+"POOL size: $($POOL.Count)"
+```
+
+---
+
+## 4) 最小測試（單股 × 短窗）
+
+> **目的**：驗證「能寫入銀層」且 gating 修復生效。
+> 規則：`--end` **不含**當日，要含 10/08 → `--end 10/09`。
+
+### 4.1 Prices（2330 / 2317；含 10/07、10/08）
+
+```powershell
+& $PY .\scripts\finmind_backfill.py --datasets TaiwanStockPrice `
+  --symbols 2330 2317 `
+  --start 2025-10-06 --end 2025-10-09 `
+  --datahub-root datahub
+```
+
+### 4.2 Chip（三大法人大買賣超）
+
+```powershell
+& $PY .\scripts\finmind_backfill.py --datasets TaiwanStockInstitutionalInvestorsBuySell `
+  --symbols 2330 2317 `
+  --start 2025-10-06 --end 2025-10-09 `
+  --datahub-root datahub
+```
+
+### 4.3 PER（供應端可到 10/08）
+
+```powershell
+& $PY .\scripts\finmind_backfill.py --datasets TaiwanStockPER `
+  --symbols 2330 2317 `
+  --start 2025-10-04 --end 2025-10-09 `
+  --datahub-root datahub
+```
+
+### 4.4 Dividend（事件日；短窗驗證）
+
+> 事件日資料**非逐日**；10/07 無事件屬正常。
+
+```powershell
+& $PY .\scripts\finmind_backfill.py --datasets TaiwanStockDividend `
+  --symbols 2330 2317 `
+  --start 2025-09-01 --end 2025-10-31 `
+  --datahub-root datahub
+```
+
+---
+
+## 5) 全市場補齊到最新（T0）
+
+> 以 `$Expect` 作 `--end`（不含）可補到 **T0**。
+> `finmind_backfill.py` 會先以 **symbol+day** 檢查 `end-1` 是否已覆蓋，缺的才呼叫。
+
+```powershell
+function NextDay($s){ if ([string]::IsNullOrWhiteSpace($s)) { return $null } ([datetime]$s).AddDays(1).ToString('yyyy-MM-dd') }
+
+$pricesStart = NextDay $pre.freshness.prices.max_date;   if (-not $pricesStart) { $pricesStart = '2025-10-01' }
+$chipStart   = NextDay $pre.freshness.chip.max_date;     if (-not $chipStart)   { $chipStart   = '2025-10-01' }
+$perStart    = NextDay $pre.freshness.per.max_date;      if (-not $perStart)    { $perStart    = '2019-01-01' }
+$divStart    = '2025-09-01'  # 事件窗建議
+
+$batch = [int]$env:FINMIND_BATCH
+$N     = $POOL.Count
+
+# prices
+for ($i=0; $i -lt $N; $i+=$batch) {
+  $j=[Math]::Min($i+$batch-1,$N-1); $SYMS=$POOL[$i..$j]
+  & $PY .\scripts\finmind_backfill.py --datasets prices `
+    --symbols $SYMS --start $pricesStart --end $Expect --datahub-root datahub
+}
+
+# chip
+for ($i=0; $i -lt $N; $i+=$batch) {
+  $j=[Math]::Min($i+$batch-1,$N-1); $SYMS=$POOL[$i..$j]
+  & $PY .\scripts\finmind_backfill.py --datasets chip `
+    --symbols $SYMS --start $chipStart --end $Expect --datahub-root datahub
+}
+
+# per（若歷史已齊，也可用 max_date+1 起）
+for ($i=0; $i -lt $N; $i+=$batch) {
+  $j=[Math]::Min($i+$batch-1,$N-1); $SYMS=$POOL[$i..$j]
+  & $PY .\scripts\finmind_backfill.py --datasets per `
+    --symbols $SYMS --start $perStart --end $Expect --datahub-root datahub
+}
+
+# dividend（事件窗，兩個月）
+for ($i=0; $i -lt $N; $i+=$batch) {
+  $j=[Math]::Min($i+$batch-1,$N-1); $SYMS=$POOL[$i..$j]
+  & $PY .\scripts\finmind_backfill.py --datasets dividend `
+    --symbols $SYMS --start $divStart --end $Expect --datahub-root datahub
+}
+```
+
+> **402 配額**：將 `$env:FINMIND_QPS='1.0'` 再跑當前批次即可；或改用 `Run‑Backfill‑All.ps1`（內建 402 等到整點再續）。
+
+---
+
+## 6) 驗收（preflight 四鍵固定輸出）
+
+```powershell
+& $PY .\scripts\preflight_check.py --rules .\rules.yaml --export .\reports --root .
+$pre = Get-Content .\reports\preflight_report.json -Raw | ConvertFrom-Json
+"prices={0}  chip={1}  dividend={2}  per={3}" -f `
+  $pre.freshness.prices.max_date, `
+  $pre.freshness.chip.max_date, `
+  $pre.freshness.dividend.max_date, `
+  $pre.freshness.per.max_date
+```
+
+**驗收口徑**
+
+* `prices / chip / per` → **= T0**（例如 2025‑10‑09）。
+* `dividend` → **最近事件日**（目前多為 2025‑10‑06；10/07 無事件屬正常）。
+
+---
+
+## 7) 監控與抽驗
+
+**抽驗 T0 當日是否進銀層（四表）**
+
+```powershell
+$Tmp = Join-Path $env:TEMP ("chk_day_{0}.py" -f ([guid]::NewGuid()))
+@"
+import os, glob, pandas as pd, sys
+root = r'datahub/silver/alpha'
+day  = sys.argv[1]
+kinds= ['prices','chip','per','dividend']
+for kind in kinds:
+    pats = [os.path.join(root, kind, 'yyyymm='+day[:7].replace('-',''), '**', '*.parquet')]
+    files = []
+    [files.extend(glob.glob(p, recursive=True)) for p in pats]
+    cnt=0
+    for f in files:
+        try:
+            df = pd.read_parquet(f, columns=['date'])
+            cnt += int((df['date'].astype(str) == day).sum())
+        except Exception:
+            pass
+    print(f"[{kind}] {day} rows={cnt} files={len(files)}")
+"@ | Set-Content -Path $Tmp -Encoding UTF8
+& $PY $Tmp $T0
+Remove-Item $Tmp -Force -EA SilentlyContinue
+```
+
+**彙總今日 metrics**
+
+```powershell
+$today = (Get-Date).ToString('yyyyMMdd')
+Get-ChildItem .\metrics\ingest_summary_*finmind.csv |
+  ? { $_.Name -like "*$today*" } |
+  % { Import-Csv $_ } |
+  Group-Object dataset | % {
+    "{0}: rows={1} files={2}" -f $_.Name, ($_.Group | Measure-Object rows_written -Sum).Sum, ($_.Group | Measure-Object files_out -Sum).Sum
+  }
+```
+
+---
+
+## 8) 常見衝突與解法（本次已修）
+
+* **Invalid URI: hostname could not be parsed** → 清理端點與權杖
+
+  ```powershell
+  if ($env:FINMIND_TOKEN){ $env:FINMIND_TOKEN=$env:FINMIND_TOKEN.Trim() }
+  $env:FINMIND_BASE_URL='https://api.finmindtrade.com/api/v4/data'
+  $env:FINMIND_BASE_URL=($env:FINMIND_BASE_URL -replace '[^\x20-\x7E]','').Trim('"').Trim()
+  ```
+* **preflight 鍵名不穩 / 索引 null** → 改用 backslash‑safe 版；**固定四鍵**輸出。
+* **f-string 反斜線 SyntaxError** → 避免在 f-string 表達式中 `.replace()`，先存變數再格式化（已修）。
+* **銀層 `date` 型別混用**（`Timestamp` vs `str`）→ 以正規化腳本統一欄位（已範例）。
+* **HTTP 402 配額** → 降 `FINMIND_QPS`；或用 `Run‑Backfill‑All.ps1` 讓它等到整點續跑。
+* **鎖檔殘留** → 若非真的在跑，刪除：`.\reports\locks\Run-Backfill-All.lock` 再執行。
+
+---
+
+## 9) 一鍵版（可選）
+
+* **整段到最新（from .. < expect_date）**
+
+```powershell
+.\tools\Run-Backfill-All.ps1 `
+  -RootPath 'C:\AI\tw-alpha-stack' `
+  -Start '2019-01-01' -End $Expect `
+  -ThrottleRPM 48 -BatchSize 400 -Verbose
+```
+
+* **補舊到新（逐日補缺口）**
+
+```powershell
+.\tools\Run-Backfill-All.ps1 `
+  -RootPath 'C:\AI\tw-alpha-stack' `
+  -FillGaps -Start '2025-10-01' -End $Expect -Verbose
+```
+
+> 需要強制重打才加 `--force`（`finmind_backfill.py` 支援），平時不建議。
+
+---
+
+## 10) 附錄：欄位正規化（per/當月）
+
+```powershell
+$PY = ".\.venv\Scripts\python.exe"
+$Tmp = Join-Path $env:TEMP ("normalize_per_{0}.py" -f ([guid]::NewGuid()))
+@"
+import os, glob, pandas as pd
+root = r'datahub/silver/alpha/per/yyyymm=202510'
+files = glob.glob(os.path.join(root,'**','*.parquet'), recursive=True)
+for f in files:
+    try:
+        df = pd.read_parquet(f)
+        df['stock_id'] = df['stock_id'].astype(str)
+        df['symbol']   = df['stock_id'].str.replace('.TW','', regex=False)
+        df['date']     = pd.to_datetime(df['date'], errors='coerce').dt.strftime('%Y-%m-%d')
+        df.to_parquet(f, index=False)
+    except Exception as e:
+        print('[WARN]', f, e)
+"@ | Set-Content -Path $Tmp -Encoding UTF8
+& $PY $Tmp
+Remove-Item $Tmp -Force -EA SilentlyContinue
+```
+
+---
+
+````
+
+### 直接把上面 MD 存成檔案（可選）
+```powershell
+$doc = @'
+(把上一段整份 Markdown 內容貼進來)
+'@
+New-Item -ItemType Directory -Force -Path .\docs | Out-Null
+Set-Content .\docs\AlphaCity_Backfill_Playbook.md $doc -Encoding UTF8
+````
+
+---
+
+### 最後確認清單（第一階段）
+
+* [ ] `prices/chip/per` = **T0**；`dividend` = 最近事件日。
+* [ ] `preflight_report.json` 四鍵穩定、Gate 規則可讀。
+* [ ] 無 402 或 402 已透過 QPS/整點等待處理。
+* [ ] 銀層欄位型別一致（必要時已正規化）。
+
+需要的話，我可以再把 **C 段「全市場補齊」**包成單一 `tools\Run-FullMarket-ToLatest.ps1`，按你目前的 Batch/QPS 與 gating 規格來實作，直接一鍵執行。
+
+
+
+
+
+------------------------------------------------------------------------------
+
+你這段 for 迴圈「看起來沒反應」通常只會有三種原因（依發生率由高到低）：
+
+1. **$POOL 是空的** → `$N = $POOL.Count` 變成 0，迴圈體完全不會執行，所以不會看到任何 Python 輸出。
+2. **參數沒有正確展開** → 例如 `$PY` 路徑錯了、或 `--symbols $SYMS` 沒傳到（但這種會丟錯，不會靜默）。
+3. **複製時混入不必要的字元/斷行** → 尤其是倒引號 `的行接續（貼上時有全形或不可見字元），PowerShell 會進入多行模式`>>`，雖然最後你補 `}` 能結束，但中間某行其實沒被當成你預期的指令。
+
+下面我給你一組 **「狀態檢查 + 安全執行」**的小節，直接貼上逐段跑，能立刻看到是卡在哪裡；同時把你的 for 迴圈改成 **不使用倒引號** 的寫法（避免代號六性質的語法坑）。
+
+---
+
+## A. 先檢查目前環境變數與視窗
+
+```powershell
+# 進專案
+Set-Location C:\AI\tw-alpha-stack
+$ErrorActionPreference = 'Stop'
+
+# 基本：Python / QPS / 端點
+$PY = '.\.venv\Scripts\python.exe'
+& $PY -V
+"FINMIND_BASE_URL = $env:FINMIND_BASE_URL"
+"FINMIND_QPS      = $env:FINMIND_QPS"
+"FINMIND_BATCH    = $env:FINMIND_BATCH"
+
+# 取得 expect_date / T0 與四鍵 freshness
+& $PY .\scripts\preflight_check.py --rules .\rules.yaml --export .\reports --root .
+$pre     = Get-Content .\reports\preflight_report.json -Raw | ConvertFrom-Json
+$Expect  = $pre.meta.expect_date
+$T0      = (Get-Date $Expect).AddDays(-1).ToString('yyyy-MM-dd')
+"Expect=$Expect  T0=$T0"
+
+$priceMax = $pre.freshness.prices.max_date
+$chipMax  = $pre.freshness.chip.max_date
+$divMax   = $pre.freshness.dividend.max_date
+$perMax   = $pre.freshness.per.max_date
+"freshness: prices=$priceMax chip=$chipMax dividend=$divMax per=$perMax"
+```
+
+> 這段會先確認 preflight 正常、`$Expect/$T0` 都拿得到。
+
+---
+
+## B. 構建投資池並檢查 $POOL.Count
+
+```powershell
+# 優先用 investable_universe.txt，其次 universe.tw_all.txt
+if (Test-Path .\configs\investable_universe.txt) {
+  $POOL = Get-Content .\configs\investable_universe.txt
+} elseif (Test-Path .\universe.tw_all.txt) {
+  $POOL = Get-Content .\universe.tw_all.txt
+} else {
+  throw "找不到投資池清單：configs\investable_universe.txt 或 universe.tw_all.txt"
+}
+
+# 正規化為 4 碼、去空白與 .TW
+$POOL = $POOL | ForEach-Object { ($_ -replace '\s','') -replace '\.TW$','' } |
+        Where-Object { $_ -match '^\d{4}$' } |
+        Sort-Object -Unique
+
+"N of POOL = $($POOL.Count)"
+if ($POOL.Count -eq 0) { throw "POOL 為 0，for 迴圈不會執行；請先檢查投資池清單內容。" }
+
+# 確認 batch 與樣本
+$batch = [int]([string]::IsNullOrWhiteSpace($env:FINMIND_BATCH) ? 400 : $env:FINMIND_BATCH)
+"N of batch = $batch"
+"Sample POOL = $($POOL[0..([Math]::Min(4,$POOL.Count-1))] -join ', ')"
+```
+
+> 若這裡顯示 `N of POOL = 0`，就是你剛剛「沒反應」的主因——迴圈體沒進去。先把投資池檔補好再跑。
+
+---
+
+## C. 定義起迄視窗（四類資料集）
+
+```powershell
+function NextDay([string]$s){ if ([string]::IsNullOrWhiteSpace($s)) { return $null } ([datetime]$s).AddDays(1).ToString('yyyy-MM-dd') }
+
+$pricesStart = if ($priceMax) { NextDay $priceMax } else { '2025-10-01' }
+$chipStart   = if ($chipMax)  { NextDay $chipMax  } else { '2025-10-01' }
+$perStart    = if ($perMax)   { NextDay $perMax   } else { '2019-01-01' }
+$divStart    = '2025-09-01'  # 事件窗建議
+
+"windows:"
+"prices: $pricesStart -> $Expect (end不含)"
+"chip  : $chipStart   -> $Expect (end不含)"
+"per   : $perStart    -> $Expect (end不含)"
+"div   : $divStart    -> $Expect (end不含)"
+```
+
+---
+
+## D. 先跑「第一批」並顯示 Debug（必有輸出）
+
+這段**只跑第一批**，並在呼叫前輸出 batch 與 symbols 資訊，確保你看到畫面有反應。
+
+```powershell
+# 取第一批符號
+$i = 0
+$j = [Math]::Min($i + $batch - 1, $POOL.Count - 1)
+$SYMS = $POOL[$i..$j]
+
+"--- Batch 0: i=$i j=$j count=$($SYMS.Count) ---"
+"SYMS sample: $($SYMS[0..([Math]::Min(9,$SYMS.Count-1))] -join ', ')"
+
+# prices
+Write-Host ">>> PRICES batch 0" -ForegroundColor Cyan
+& $PY .\scripts\finmind_backfill.py --datasets prices --symbols $SYMS --start $pricesStart --end $Expect --datahub-root datahub
+
+# chip
+Write-Host ">>> CHIP batch 0" -ForegroundColor Cyan
+& $PY .\scripts\finmind_backfill.py --datasets chip   --symbols $SYMS --start $chipStart   --end $Expect --datahub-root datahub
+
+# per
+Write-Host ">>> PER batch 0" -ForegroundColor Cyan
+& $PY .\scripts\finmind_backfill.py --datasets per    --symbols $SYMS --start $perStart    --end $Expect --datahub-root datahub
+
+# dividend
+Write-Host ">>> DIVIDEND batch 0" -ForegroundColor Cyan
+& $PY .\scripts\finmind_backfill.py --datasets dividend --symbols $SYMS --start $divStart  --end $Expect --datahub-root datahub
+```
+
+> 這裡如果仍「完全沒輸出」，再檢：
+> `& $PY -c "print('HELLO')"` 是否能印？若不能，$PY 路徑有問題。
+> 能印，但 backfill 沒印，那就是傳參異常或 Python 腳本被覆蓋錯誤——跑一條最小指令測試：
+> `& $PY .\scripts\finmind_backfill.py --datasets prices --symbols 2330 --start $pricesStart --end $Expect --datahub-root datahub`
+
+---
+
+## E. 確定 OK 再跑「全批次」版（不使用倒引號）
+
+確定 D 段有輸出、且檔案有寫入後，再跑完整全市場。下面把你的 for 迴圈改成**單行參數、不用倒引號**（避免貼上時混入全形/不可見字元）。
+
+```powershell
+$N = $POOL.Count
+
+# prices
+for ($i=0; $i -lt $N; $i+=$batch) {
+  $j    = [Math]::Min($i + $batch - 1, $N - 1)
+  $SYMS = $POOL[$i..$j]
+  Write-Host ("[PRICES] batch {0}-{1} / {2}" -f $i,$j,$N) -ForegroundColor Green
+  & $PY .\scripts\finmind_backfill.py --datasets prices --symbols $SYMS --start $pricesStart --end $Expect --datahub-root datahub
+}
+
+# chip
+for ($i=0; $i -lt $N; $i+=$batch) {
+  $j    = [Math]::Min($i + $batch - 1, $N - 1)
+  $SYMS = $POOL[$i..$j]
+  Write-Host ("[CHIP] batch {0}-{1} / {2}" -f $i,$j,$N) -ForegroundColor Green
+  & $PY .\scripts\finmind_backfill.py --datasets chip --symbols $SYMS --start $chipStart --end $Expect --datahub-root datahub
+}
+
+# per
+for ($i=0; $i -lt $N; $i+=$batch) {
+  $j    = [Math]::Min($i + $batch - 1, $N - 1)
+  $SYMS = $POOL[$i..$j]
+  Write-Host ("[PER] batch {0}-{1} / {2}" -f $i,$j,$N) -ForegroundColor Green
+  & $PY .\scripts\finmind_backfill.py --datasets per --symbols $SYMS --start $perStart --end $Expect --datahub-root datahub
+}
+
+# dividend（事件窗）
+for ($i=0; $i -lt $N; $i+=$batch) {
+  $j    = [Math]::Min($i + $batch - 1, $N - 1)
+  $SYMS = $POOL[$i..$j]
+  Write-Host ("[DIVIDEND] batch {0}-{1} / {2}" -f $i,$j,$N) -ForegroundColor Green
+  & $PY .\scripts\finmind_backfill.py --datasets dividend --symbols $SYMS --start $divStart --end $Expect --datahub-root datahub
+}
+```
+
+---
+
+## F. 402 防呆 / 沒反應 Troubleshooting checklist
+
+* **QPS 降到 1.0**
+
+  ```powershell
+  $env:FINMIND_QPS = '1.0'
+  ```
+* **確認 Python 呼叫真的有輸出**
+  `& $PY -c "print('HELLO')"`
+  若沒輸出，$PY 路徑不對。
+* **確認 `Strict Fix` 版本在位**（你剛已覆蓋 OK）：
+
+  * `finmind_backfill.py` 會印 `=== FinMind Backfill (API, Strict Fix) ===`
+  * `preflight_check.py` 會印 backslash-safe 的路徑行。
+* **POOL 為 0** → 重新建立投資池（見 B 段）。
+* **Windows 全形/不可見字元** → 避免倒引號接續，或改在**同一行**寫完參數（如 E 段）。
+* **Start/End 視窗** → `--end` 不含；要含 10/09 T0 就給 `--end $Expect`。若 start ≥ end，API 會回空。
+
+---
+
+只要照 A→B→C→D 的順序跑，你會很清楚看到哪一步沒有如預期執行；D 段必定印出 Python 的標頭，如果沒有，問題就不在資料而在指令/環境（$PY、$POOL、參數）。有任何一步的輸出貼回來，我就針對「那一步」繼續幫你把脈。

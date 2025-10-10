@@ -1,0 +1,22 @@
+[CmdletBinding()]
+param(
+  [string]$Root = "C:\AI\tw-alpha-stack",
+  [string]$Time = "20:05",                   # 24h, local time
+  [string]$TaskName = "AlphaCity Nightly",
+  [ValidateSet("SYSTEM","CurrentUser")] [string]$RunAs = "SYSTEM"
+)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$entry = Join-Path $Root "tools\Invoke-Nightly.ps1"
+if (-not (Test-Path -LiteralPath $entry)) { throw "Entry not found: $entry" }
+
+$cmd = 'pwsh -NoProfile -ExecutionPolicy Bypass -File "{0}" -RulesMode base' -f $entry
+if ($RunAs -eq 'SYSTEM') {
+  schtasks /Create /F /SC DAILY /TN "$TaskName" /TR "$cmd" /ST $Time /RL HIGHEST /RU "SYSTEM" | Out-Null
+} else {
+  # 以目前使用者註冊（可能需要密碼；若環境不允許建議改用 SYSTEM）
+  $ru = $env:USERNAME
+  schtasks /Create /F /SC DAILY /TN "$TaskName" /TR "$cmd" /ST $Time /RL HIGHEST /RU "$ru" | Out-Null
+}
+Write-Host ("[ok] Scheduled: {0} @ {1}, runas={2}" -f $TaskName,$Time,$RunAs)
+Write-Host "檢視：taskschd.msc 或  schtasks /Query /TN `"$TaskName`" /V /FO LIST"

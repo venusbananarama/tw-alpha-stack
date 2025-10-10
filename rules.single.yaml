@@ -1,0 +1,5 @@
+symbols:
+- 2491.TW
+min_listing_days: 1
+exclude_status: []
+allow_boards: [TSE, OTC]

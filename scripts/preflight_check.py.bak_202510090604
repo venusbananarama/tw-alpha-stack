@@ -1,0 +1,117 @@
+import argparse, json
+from pathlib import Path
+import pandas as pd
+import pyarrow.parquet as pq
+from datetime import datetime
+import pytz
+
+TZ = pytz.timezone("Asia/Taipei")
+
+def load_calendar():
+    p = Path("cal/trading_days.csv")
+    if not p.exists():
+        # 若沒有行事曆，回傳今天（避免整支爆掉）
+        today = pd.Timestamp.now(tz=TZ).normalize()
+        return pd.DatetimeIndex([today])
+    # 強健讀法：不信任表頭，全部當字串讀進來後轉型
+    s = pd.read_csv(p, header=None, dtype=str, names=["date"], on_bad_lines="skip")["date"]
+    # 去掉空白與空值
+    s = s.fillna("").astype(str).str.strip()
+    # 丟掉顯示為 'date' 的表頭與非日期垃圾列
+    s = s[s.str.match(r"^\d{4}-\d{2}-\d{2}$")]
+    dt = pd.to_datetime(s, errors="coerce", utc=False)
+    dt = dt.dropna().dt.tz_localize(TZ)
+    return pd.DatetimeIndex(dt)
+
+def expect_trading_date():
+    cal = load_calendar().sort_values()
+    now_tw = pd.Timestamp.now(tz=TZ).normalize()
+    # 取小於等於今天的最後一個交易日
+    past = cal[cal <= now_tw]
+    return (past.max().date() if len(past) else now_tw.date())
+
+def scan_max_date(ds_root: Path):
+    # 掃描所有 yyyymm=*/**/*.parquet，僅取 date 欄位
+    if not ds_root.exists():
+        return None
+    hits = []
+    for f in ds_root.glob("yyyymm=*/**/*.parquet"):
+        try:
+            t = pq.read_table(f, columns=["date"])
+            if t.num_rows == 0:
+                continue
+            s = pd.Series(t.to_pandas()["date"])
+            d = pd.to_datetime(s, errors="coerce")
+            d = d.dropna()
+            if not d.empty:
+                hits.append(d.max())
+        except Exception:
+            # 單檔壞掉不影響整體結果
+            continue
+    if not hits:
+        return None
+    # 允許無時區 / 有時區混用，最後取日期
+    m = max(pd.to_datetime(pd.Series(hits), errors="coerce").dropna())
+    return m.date() if pd.notna(m) else None
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rules", required=True)   # 仍保留參數，供外層流程一致
+    ap.add_argument("--export", required=True)
+    ap.add_argument("--root", default=".")
+    args = ap.parse_args()
+
+    root = Path(args.root)
+    datahub = (root / "datahub" / "silver" / "alpha")
+    datasets = {
+        "prices":   datahub / "prices",
+        "chip":     datahub / "chip",
+        "dividend": datahub / "dividend",
+        "per":      datahub / "per",
+    }
+
+    exp = {
+        "freshness": [],
+        "dup_partitions": [],
+        "meta": {
+            "timezone": "Asia/Taipei",
+            "expect_date": str(expect_trading_date()),
+            "root": str(root.resolve())
+        }
+    }
+
+    # freshness
+    for name, path in datasets.items():
+        mx = scan_max_date(path)
+        exp["freshness"].append({
+            "dataset": str(path).replace("\\", "\\\\") if "\\" in str(path) else str(path),
+            "exists": path.exists(),
+            "ok": (mx is not None) and (str(mx) >= exp["meta"]["expect_date"]),
+            "max_date": (str(mx) if mx is not None else None),
+        })
+
+    # dup_partitions：只檢查是否存在 *.bak_* 的備份分割
+    for name, path in datasets.items():
+        bak = list((root / "datahub" / "_archive").glob("yyyymm=*.bak_*"))
+        exp["dup_partitions"].append({
+            "dataset": str(path).replace("\\", "\\\\") if "\\" in str(path) else str(path),
+            "ok": len(bak) == 0,
+            "bak_count": len(bak),
+        })
+
+    Path(args.export).mkdir(parents=True, exist_ok=True)
+    out = Path(args.export) / "preflight_report.json"
+    out.write_text(json.dumps(exp, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # 同步印出簡要
+    print(f"[Preflight] expect_date={exp['meta']['expect_date']} tz=Asia/Taipei")
+    for r in exp["freshness"]:
+        ok = "OK" if r["ok"] else "FAIL"
+        print(f"  freshness [{ok}] {r['dataset']} max_date={r['max_date']}")
+    for r in exp["dup_partitions"]:
+        ok = "OK" if r["ok"] else "FAIL"
+        print(f"  dup_check [{ok}] {r['dataset']} bak_count={r['bak_count']}")
+
+if __name__ == "__main__":
+    main()
+

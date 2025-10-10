@@ -1,0 +1,600 @@
+
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+finmind_backfill.py — API (Phase-oriented, SENTINEL-safe)
+
+Highlights
+- Phase oriented: market-wide phase (e.g., stock_info) completes before single-stock phase (prices/chip).
+- Concurrency safety: uses SENTINEL shutdown; every q.get() maps to exactly one q.task_done().
+- Global rate limiting: QPS + hourly cap (default 6000); auto-adjusts QPS if needed.
+- Resume support: progress tracked by (dataset, symbol, start, end).
+- Schema alignment: supports flat or {"required","types"} YAML; casts types before writing.
+- Write pattern: monthly partition yyyymm=YYYYMM, UUID filenames, primary-key de-dup.
+- Investable auto-use: if --symbols not provided, will prefer <datahub>/_meta/investable_universe.csv or symbols.txt;
+  otherwise falls back to TaiwanStockInfo filtered by --universe.
+- Metrics CSV: writes metrics/ingest_summary_YYYYMMDD-HHMMSS_finmind.csv
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import queue
+import sys
+import threading
+import time
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import pandas as pd
+
+try:
+    import requests  # type: ignore
+except Exception:
+    requests = None
+
+try:
+    import yaml  # type: ignore
+except Exception:
+    yaml = None
+
+# --------------------------------------------------------------------------------------
+# Constants & Paths
+# --------------------------------------------------------------------------------------
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]  # .../tw-alpha-stack
+SENTINEL: object = object()  # unique sentinel object for worker shutdown
+
+API_V4 = "https://api.finmindtrade.com/api/v4/data"
+API_V3 = "https://api.finmindtrade.com/api/v3/data"
+
+
+def _compat_params(params: dict) -> dict:
+    d = dict(params or {})
+    if d.get("dataset") in ("TaiwanStockPrice","TaiwanStockPER","TaiwanStockDividend","TaiwanStockInstitutionalInvestorsBuySell"):
+        if "stock_id" in d and "data_id" not in d:
+            d["data_id"] = d["stock_id"]
+    return d
+
+
+SINGLE_STOCK = {  # needs stock_id
+    "prices": "TaiwanStockPrice",
+    "chip": "TaiwanStockInstitutionalInvestorsBuySell",
+    "dividend": "TaiwanStockDividend",
+    "per": "TaiwanStockPER",
+}
+MARKET_WIDE = {   # no stock_id
+    "stock_info": "TaiwanStockInfo",
+}
+ALIASES = {
+    "TaiwanStockPrice": "prices",
+    "TaiwanStockInstitutionalInvestorsBuySell": "chip",
+    "TaiwanStockInfo": "stock_info",
+}
+
+
+# --------------------------------------------------------------------------------------
+# Utilities
+# --------------------------------------------------------------------------------------
+
+def ensure_dir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
+
+
+def silver_dir(root: Path, dataset: str, yyyymm: str) -> Path:
+    return root / "silver" / "alpha" / dataset / f"yyyymm={yyyymm}"
+
+
+def metrics_path() -> Path:
+    ensure_dir(PROJECT_ROOT / "metrics")
+    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    return PROJECT_ROOT / "metrics" / f"ingest_summary_{ts}_finmind.csv"
+
+
+def stock_id_from_symbol(sym: str) -> str:
+    # 2330.TW -> 2330
+    return str(sym).split(".")[0]
+
+
+def sym_with_suffix(stock_id: str, universe: str) -> str:
+    return f"{stock_id}.TWO" if universe.upper() == "OTC" else f"{stock_id}.TW"
+
+
+def norm_dataset(name: str) -> str:
+    return ALIASES.get(name, name)
+
+
+# --------------------------------------------------------------------------------------
+# Token & Rate Limiting
+# --------------------------------------------------------------------------------------
+
+def get_token(cli: Optional[str]) -> Optional[str]:
+    if cli:
+        return cli
+    v = os.environ.get("FINMIND_TOKEN")
+    if v:
+        return v
+    f = PROJECT_ROOT / "secrets" / "finmind_token.txt"
+    if f.exists():
+        return f.read_text(encoding="utf-8").strip()
+    return None
+
+
+class RateLimiter:
+    """Global rate limiter: QPS + hourly cap."""
+    def __init__(self, qps: float, hourly_cap: int):
+        from collections import deque
+        self.calls = deque()
+        self.qps = max(0.1, float(qps))
+        self.hourly_cap = int(hourly_cap)
+        self.last_ts = 0.0
+        cap_qps = (self.hourly_cap / 3600.0) * 0.95  # 5% headroom
+        if self.qps > cap_qps:
+            self.qps = cap_qps
+
+    def acquire(self):
+        now = time.time()
+        gap = 1.0 / self.qps
+        wait = self.last_ts + gap - now
+        if wait > 0:
+            time.sleep(wait)
+            now = time.time()
+        # hourly cap
+        while self.calls and now - self.calls[0] > 3600.0:
+            self.calls.popleft()
+        if len(self.calls) >= self.hourly_cap:
+            time.sleep(3600.0 - (now - self.calls[0]) + 0.05)
+            return self.acquire()
+        self.calls.append(now)
+        self.last_ts = now
+
+
+def http_get(url: str, params: dict, rl: RateLimiter, timeout: float = 45.0, retries: int = 3) -> dict:
+    if requests is None:
+        raise RuntimeError("Missing requests. Please install: pip install requests")
+    err: Optional[Exception] = None
+    for i in range(1, retries + 1):
+        try:
+            rl.acquire()
+            r = requests.get(url, params=params, timeout=timeout)
+            if r.status_code == 200:
+                return r.json()
+            err = RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+        except Exception as e:  # noqa: BLE001
+            err = e
+        time.sleep(min(2 * i, 8))
+    assert err is not None
+    raise err
+
+
+# --------------------------------------------------------------------------------------
+# Schema helpers
+# --------------------------------------------------------------------------------------
+
+def load_schema_map() -> Dict[str, Dict[str, object]]:
+    path = PROJECT_ROOT / "schemas" / "datasets_schema.yaml"
+    if not path.exists() or yaml is None:
+        print(f"WARNING: schema missing or PyYAML not installed: {path}. Using permissive mode.")
+        return {}
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def coerce_by_schema(df: pd.DataFrame, dset: str, schema_map: Dict[str, Dict[str, object]]) -> pd.DataFrame:
+    sch = schema_map.get(dset) or {}
+    # support flat or {"required","types"}
+    if "types" in sch or "required" in sch:
+        types_map = dict(sch.get("types", {}))  # type: ignore[call-arg]
+    else:
+        types_map = {k: str(v) for k, v in sch.items()}  # type: ignore[call-arg]
+    out = df.copy()
+    for col, typ in types_map.items():
+        if col not in out.columns:
+            continue
+        try:
+            if typ == "date":
+                out[col] = pd.to_datetime(out[col])
+            elif typ in ("int", "int64"):
+                out[col] = pd.to_numeric(out[col], errors="coerce").astype("Int64")
+            elif typ in ("float", "float64", "double"):
+                out[col] = pd.to_numeric(out[col], errors="coerce")
+            elif typ in ("string", "str", "category"):
+                out[col] = out[col].astype("string")
+        except Exception:
+            # keep permissive; validators will catch downstream
+            pass
+    return out
+
+
+# --------------------------------------------------------------------------------------
+# Writers
+# --------------------------------------------------------------------------------------
+
+def write_silver(root: Path, dataset: str, df: pd.DataFrame, schema_map: Dict[str, Dict[str, object]]) -> List[Path]:
+    if df is None or df.empty:
+        return []
+    df = coerce_by_schema(df, dataset, schema_map)
+    # PK de-dup
+    keys = ["date", "symbol"] if "symbol" in df.columns else (["date", "series"] if "series" in df.columns else ["date"])
+    df = df.drop_duplicates(subset=keys, keep="last")
+    # monthly partition
+    df["_yyyymm"] = pd.to_datetime(df["date"]).dt.strftime("%Y%m")
+
+    outs: List[Path] = []
+    for yyyymm, g in df.groupby("_yyyymm", as_index=False):
+        out_dir = silver_dir(root, dataset, str(yyyymm))
+        ensure_dir(out_dir)
+        out_file = out_dir / f"batch-{uuid.uuid4().hex}.parquet"
+        g.drop(columns=["_yyyymm"]).to_parquet(out_file, index=False)
+        outs.append(out_file)
+    return outs
+
+
+# --------------------------------------------------------------------------------------
+# Fetchers
+# --------------------------------------------------------------------------------------
+
+def fetch_stock_list(universe: str, rl: RateLimiter, token: Optional[str]) -> List[str]:
+    params = {"dataset": MARKET_WIDE["stock_info"]}
+    if token:
+        params["token"] = token
+    data = http_get(API_V4, params, rl) or {}
+    if "data" not in data:
+        data = http_get(API_V3, params, rl) or {}
+    df = pd.DataFrame(data.get("data", []))
+    if df.empty:
+        return []
+    uni = universe.upper()
+    if "market" in df.columns:
+        m = df["market"].astype(str).str.upper()
+        if uni == "TSE":
+            df = df[m.str.contains("TSE|上市", na=False)]
+        elif uni == "OTC":
+            df = df[m.str.contains("OTC|上櫃", na=False)]
+        else:
+            df = df[m.str.contains("TSE|上市|OTC|上櫃", na=False)]
+    return [str(x) for x in df["stock_id"].dropna().unique().tolist()]
+
+
+def fetch_dataset_range(dataset: str, start: str, end: str, rl: RateLimiter,
+                        token: Optional[str], stock_id: Optional[str]) -> pd.DataFrame:
+    dname = SINGLE_STOCK.get(dataset) or MARKET_WIDE.get(dataset) or dataset
+    params = {"dataset": dname, "start_date": start, "end_date": end}
+    if token:
+        params["token"] = token
+    if stock_id:
+        params["stock_id"] = stock_id
+    data = http_get(API_V4, params, rl) or {}
+    if "data" not in data:
+        data = http_get(API_V3, params, rl) or {}
+    df = pd.DataFrame(data.get("data", []))
+    if df.empty:
+        return df
+
+    if dataset == "prices":
+        # unify columns: date, symbol, open, high, low, close, volume
+        ren = {"max": "high", "min": "low", "Trading_Volume": "volume"}
+        for k, v in ren.items():
+            if k not in df.columns and v in df.columns:
+                df[k] = df[v]
+        need = ["date", "stock_id", "open", "max", "min", "close", "Trading_Volume"]
+        df = df[[c for c in need if c in df.columns]].rename(columns=ren)
+    elif dataset == "chip":
+        fb = df.get("foreign_buy", 0); fs = df.get("foreign_sell", 0)
+        tb = df.get("invest_trust_buy", 0); ts = df.get("invest_trust_sell", 0)
+        db = df.get("dealer_buy", 0) + df.get("dealer_self_buy", 0) + df.get("dealer_hq_buy", 0)
+        ds = df.get("dealer_sell", 0) + df.get("dealer_self_sell", 0) + df.get("dealer_hq_sell", 0)
+        df = pd.DataFrame({
+            "date": df.get("date"),
+            "stock_id": df.get("stock_id"),
+            "foreign_net": fb - fs,
+            "invest_trust_net": tb - ts,
+            "dealer_net": db - ds,
+        })
+        df["total_net"] = df["foreign_net"] + df["invest_trust_net"] + df["dealer_net"]
+    return df
+
+
+# --------------------------------------------------------------------------------------
+# Progress & Metrics
+# --------------------------------------------------------------------------------------
+
+class Progress:
+    def __init__(self, path: Path):
+        self.path = path
+        ensure_dir(path.parent)
+        self._lock = threading.Lock()
+        try:
+            self.done = set(json.loads(path.read_text(encoding="utf-8")).get("done", [])) if path.exists() else set()
+        except Exception:
+            self.done = set()
+
+    def key(self, dataset: str, start: str, end: str, symbol: Optional[str]) -> str:
+        return f"{dataset}|{symbol or ''}|{start}|{end}"
+
+    def is_done(self, dataset: str, start: str, end: str, symbol: Optional[str]) -> bool:
+        return self.key(dataset, start, end, symbol) in self.done
+
+    def mark_done(self, dataset: str, start: str, end: str, symbol: Optional[str]):
+        with self._lock:
+            self.done.add(self.key(dataset, start, end, symbol))
+            self.path.write_text(json.dumps({"done": sorted(self.done)}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+class Metrics:
+    def __init__(self, out_path: Path):
+        self.out_path = out_path
+        self.rows: List[dict] = []
+        self._lock = threading.Lock()
+
+    def add(self, **kwargs):
+        with self._lock:
+            self.rows.append(kwargs)
+
+    def flush(self):
+        if not self.rows:
+            return
+        df = pd.DataFrame(self.rows)
+        ensure_dir(self.out_path.parent)
+        df.to_csv(self.out_path, index=False, encoding="utf-8")
+
+
+# --------------------------------------------------------------------------------------
+# Investable list loading
+# --------------------------------------------------------------------------------------
+
+def load_investable_symbols(datahub_root: Path, universe: str) -> Optional[List[str]]:
+    meta = datahub_root / "_meta"
+    csv_path = meta / "investable_universe.csv"
+    txt_path = meta / "symbols.txt"
+    if csv_path.exists():
+        df = pd.read_csv(csv_path, encoding="utf-8")
+        col = "symbol" if "symbol" in df.columns else df.columns[0]
+        syms = df[col].dropna().astype(str).tolist()
+        # force suffix by universe (TSE->.TW, OTC->.TWO), keep as-is for ALL
+        out: List[str] = []
+        for s in syms:
+            sid = stock_id_from_symbol(s)
+            out.append(sym_with_suffix(sid, universe) if universe.upper() in ("TSE", "OTC") else s)
+        return sorted(set(out))
+    if txt_path.exists():
+        syms = Path(txt_path).read_text(encoding="utf-8").splitlines()
+        out = []
+        for s in syms:
+            sid = stock_id_from_symbol(s)
+            out.append(sym_with_suffix(sid, universe) if universe.upper() in ("TSE", "OTC") else s)
+        return sorted(set(out))
+    return None
+
+
+# --------------------------------------------------------------------------------------
+# Planning & Running
+# --------------------------------------------------------------------------------------
+
+class Task:
+    __slots__ = ("dataset", "start", "end", "symbol")
+    def __init__(self, dataset: str, start: str, end: str, symbol: Optional[str]):
+        self.dataset = dataset; self.start = start; self.end = end; self.symbol = symbol
+
+
+def plan_tasks(datasets: List[str], start: str, end: str,
+               universe: str, symbols: Optional[List[str]],
+               rl: RateLimiter, token: Optional[str],
+               datahub_root: Path) -> Tuple[List[Task], List[Task], int, int, List[str]]:
+    """Return: market_phase, stock_phase, est_calls, n_symbols, notes"""
+    dsets = [norm_dataset(d) for d in datasets]
+    market_phase: List[Task] = []
+    stock_phase: List[Task] = []
+    notes: List[str] = []
+
+    # resolve symbols (CLI > investable > API list)
+    stock_ids: List[str] = []
+    if symbols:
+        stock_ids = [stock_id_from_symbol(s) for s in symbols]
+        notes.append(f"Symbols from CLI: {len(stock_ids)}")
+    else:
+        inv = load_investable_symbols(datahub_root, universe)
+        if inv:
+            stock_ids = [stock_id_from_symbol(s) for s in inv]
+            notes.append(f"Symbols from investable_universe: {len(stock_ids)}")
+        else:
+            stock_ids = fetch_stock_list(universe, rl, token)
+            notes.append(f"Symbols from {MARKET_WIDE['stock_info']}/{universe}: {len(stock_ids)}")
+
+    for d in dsets:
+        if d in MARKET_WIDE:
+            market_phase.append(Task(d, start, end, None))
+        if d in SINGLE_STOCK:
+            stock_phase.append(Task(d, start, end, ",".join(stock_ids)))
+
+    est_calls = len(market_phase) + sum(len(t.symbol.split(",")) for t in stock_phase)
+    return market_phase, stock_phase, est_calls, len(stock_ids), notes
+
+
+def run_market_phase(tasks: List[Task], datahub_root: Path,
+                     rl: RateLimiter, token: Optional[str],
+                     schema_map: Dict[str, Dict[str, object]],
+                     metrics: Metrics):
+    for t in tasks:
+        t0 = time.time()
+        status = "OK"; nrows = 0; nfiles = 0
+        try:
+            df = fetch_dataset_range(t.dataset, t.start, t.end, rl, token, None)
+            nrows = 0 if df is None else len(df)
+            if df is None or df.empty:
+                status = "EMPTY"
+            elif t.dataset == "stock_info":
+                out = datahub_root / "raw" / "finmind" / "stock_info.json"
+                ensure_dir(out.parent)
+                out.write_text(df.to_json(orient="records", force_ascii=False), encoding="utf-8")
+                print(f"saved stock_info -> {out}")
+            else:
+                outs = write_silver(datahub_root, t.dataset, df, schema_map); nfiles = len(outs)
+        except Exception as e:  # noqa: BLE001
+            status = f"ERR:{e}"
+        finally:
+            metrics.add(phase="market", dataset=t.dataset, symbol="",
+                        start=t.start, end=t.end, rows=nrows, files=nfiles,
+                        status=status, elapsed=round(time.time()-t0,3))
+
+
+def run_stock_phase(tasks: List[Task], datahub_root: Path, universe: str,
+                    rl: RateLimiter, token: Optional[str],
+                    schema_map: Dict[str, Dict[str, object]],
+                    progress: Progress, metrics: Metrics, workers: int):
+    # flatten to one task per symbol
+    sub_tasks: List[Task] = []
+    for t in tasks:
+        ids = (t.symbol or "").split(",")
+        for sid in ids:
+            sub_tasks.append(Task(t.dataset, t.start, t.end, sym_with_suffix(sid, universe)))
+
+    q: "queue.Queue[Task | object]" = queue.Queue()
+    for st in sub_tasks:
+        q.put(st)
+    # one sentinel per worker
+    n_workers = max(1, int(workers))
+    for _ in range(n_workers):
+        q.put(SENTINEL)
+
+    def worker_fn():
+        while True:
+            item = q.get()  # blocking; always matched with task_done in finally
+            try:
+                if item is SENTINEL:
+                    return
+                t: Task = item  # type: ignore[assignment]
+                if progress.is_done(t.dataset, t.start, t.end, t.symbol):
+                    continue
+                t0 = time.time()
+                status = "OK"; nrows = 0; nfiles = 0
+                try:
+                    df = fetch_dataset_range(t.dataset, t.start, t.end, rl, token, stock_id_from_symbol(t.symbol))
+                    if df is None or df.empty:
+                        status = "EMPTY"
+                        progress.mark_done(t.dataset, t.start, t.end, t.symbol)
+                        print(f"⚠️ {t.dataset} {t.symbol}: empty")
+                    else:
+                        df["symbol"] = t.symbol
+                        outs = write_silver(datahub_root, t.dataset, df, schema_map)
+                        nrows = len(df); nfiles = len(outs)
+                        progress.mark_done(t.dataset, t.start, t.end, t.symbol)
+                        print(f"OK {t.dataset} {t.symbol}: {nrows} rows -> {nfiles} files")
+                except Exception as e:  # noqa: BLE001
+                    status = f"ERR:{e}"
+                    print(f"x {t.dataset} {t.symbol}: {e}")
+                finally:
+                    metrics.add(phase="stock", dataset=t.dataset, symbol=t.symbol or "",
+                                start=t.start, end=t.end, rows=nrows, files=nfiles,
+                                status=status, elapsed=round(time.time()-t0,3))
+            finally:
+                q.task_done()
+
+    threads: List[threading.Thread] = []
+    for _ in range(n_workers):
+        th = threading.Thread(target=worker_fn, daemon=True)
+        th.start(); threads.append(th)
+
+    q.join()
+    for th in threads:
+        th.join(timeout=0.1)
+
+
+# --------------------------------------------------------------------------------------
+# Main
+# --------------------------------------------------------------------------------------
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--start", required=True)
+    ap.add_argument("--end", required=True)
+    ap.add_argument("--datasets", nargs="+", required=True)
+    ap.add_argument("--universe", default="TSE")  # TSE / OTC / ALL
+    ap.add_argument("--symbols", nargs="*", default=None)
+    ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--qps", type=float, default=1.5)
+    ap.add_argument("--hourly-cap", type=int, default=6000)
+    ap.add_argument("--datahub-root", default=str(PROJECT_ROOT / "datahub"))
+    ap.add_argument("--api-token", default=None)
+    ap.add_argument("--plan-only", action="store_true")
+    args = ap.parse_args()
+
+    token = get_token(args.api_token)
+    rl = RateLimiter(args.qps, args.hourly_cap)
+    schema_map = load_schema_map()
+    datahub_root = Path(args.datahub_root); ensure_dir(datahub_root)
+    progress = Progress(datahub_root / "_progress" / "backfill_progress.json")
+    metrics = Metrics(metrics_path())
+
+    market_phase, stock_phase, est_calls, n_syms, notes = plan_tasks(
+        args.datasets, args.start, args.end, args.universe, args.symbols, rl, token, datahub_root
+    )
+
+    print("=== FinMind Backfill (API, Phase-oriented, SENTINEL-safe) ===")
+    print(f"Start={args.start} End={args.end} Universe={args.universe}")
+    print(f"Datasets={','.join([norm_dataset(d) for d in args.datasets])}")
+    if args.symbols:
+        print(f"Mode=單股 指定 {len(args.symbols)} 檔")
+    else:
+        print(f"Mode=全市場（清單 {n_syms} 檔；逐檔跑單股型資料集）")
+    for m in notes:
+        print("Note:", m)
+    print(f"Workers={args.workers} QPS={rl.qps:.3f} HourlyCap={args.hourly_cap} EstCalls={est_calls}")
+
+    if args.plan_only:
+        return 0
+
+    if market_phase:
+        print("== Phase 1: Market-wide datasets ==")
+        run_market_phase(market_phase, datahub_root, rl, token, schema_map, metrics)
+
+    if stock_phase:
+        print("== Phase 2: Single-stock datasets ==")
+        run_stock_phase(stock_phase, datahub_root, args.universe, rl, token, schema_map, progress, metrics, args.workers)
+
+    metrics.flush()
+    print(f"=== Backfill Done ===  metrics: {metrics.out_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+# ===== AlphaCity patch: always emit metrics path (with flush) =====
+try:
+    _ALPHACITY_METRICS_EMITTED  # guard if upstream already emitted
+except NameError:
+    _ALPHACITY_METRICS_EMITTED = False
+
+def _alphacity_emit_metrics_fallback():
+    import os, sys
+    from pathlib import Path
+
+    # 1) 如果上游有定義 metrics_path 且檔案存在，直接輸出（確保 flush）
+    mp = globals().get("metrics_path", None)
+    if isinstance(mp, (str, os.PathLike)) and os.path.exists(mp):
+        print(f"=== Backfill Done ===  metrics: {mp}", flush=True)
+        return True
+
+    # 2) 否則回退到專案 metrics 目錄的最新 ingest_summary_*.csv
+    try:
+        metrics_dir = (Path(__file__).resolve().parents[1] / "metrics")
+        if metrics_dir.exists():
+            cands = sorted(metrics_dir.glob("ingest_summary_*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if cands:
+                print(f"=== Backfill Done ===  metrics: {cands[0]}", flush=True)
+                return True
+    except Exception:
+        pass
+    return False
+
+if not _ALPHACITY_METRICS_EMITTED:
+    if _alphacity_emit_metrics_fallback():
+        _ALPHACITY_METRICS_EMITTED = True
+# ===== end AlphaCity patch =====
+
+

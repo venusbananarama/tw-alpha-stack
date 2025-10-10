@@ -1,3 +1,5 @@
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 param([switch]$Apply)
 $TAG = Get-Date -Format 'yyyyMMdd_HHmm'
 $ARCH = "./_archive/$TAG"
@@ -70,3 +72,4 @@ if (-not $Apply){
 } else {
   Write-Output ("--- 已套用：封存位置 -> {0}" -f $ARCH)
 }
+

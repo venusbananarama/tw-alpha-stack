@@ -1,3 +1,5 @@
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 function acklive {
   param(
     [Parameter(Mandatory=$true)][string]$Start,

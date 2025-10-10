@@ -1,3 +1,5 @@
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 param(
   [Parameter(Mandatory=$true)][string] $Dir,
   [int] $Max = 5,

@@ -1,0 +1,35 @@
+[CmdletBinding()]
+param(
+  [string]$RootPath="C:\AI\tw-alpha-stack",
+  [int]$IntervalSec=30
+)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+Set-Location $RootPath
+
+Write-Host "[monitor] 每 $IntervalSec 秒輪詢 preflight_report.json 與最新 nightly_*.log（Ctrl+C 退出）"
+while ($true) {
+  try {
+    $pf = ".\reports\preflight_report.json"
+    if (Test-Path -LiteralPath $pf) {
+      $j = Get-Content -LiteralPath $pf -Raw | ConvertFrom-Json
+      $pr = $j.freshness.prices.max_date
+      $ch = $j.freshness.chip.max_date
+      $an = if ($j.calendar) { $j.calendar.anchor } else { $null }
+      Write-Host ("freshness: prices={0}  chip={1}  anchor={2}" -f $pr,$ch,$an)
+    } else {
+      Write-Host "preflight_report.json 尚未產生"
+    }
+    $log = Get-ChildItem .\reports -Filter "nightly_*.log" -ErrorAction SilentlyContinue |
+      Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($log) {
+      Write-Host ("--- tail {0} ---" -f $log.Name)
+      Get-Content -LiteralPath $log.FullName -Tail 40
+    } else {
+      Write-Host "尚無 nightly_*.log"
+    }
+  } catch {
+    Write-Warning $_.Exception.Message
+  }
+  Start-Sleep -Seconds $IntervalSec
+}

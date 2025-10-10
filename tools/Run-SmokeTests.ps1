@@ -1,3 +1,5 @@
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 # gptcodex: alpha → tools/Run-SmokeTests.ps1
 param()
 
@@ -17,3 +19,4 @@ if (-not (Test-Path $py)) { $py = "python" }
 & $py -X utf8 ".\scripts\preflight_check.py"
 
 Write-Host "[SMOKE] Preflight OK. 可接續你的 smoke 測試流程。"
+

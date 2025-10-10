@@ -1,0 +1,19 @@
+universe:
+  mode: from_file
+  file: configs/investable_universe.txt
+
+gates:
+  # 流動性與上市日門檻全放寬，避免被刷掉（小池驗證用）
+  min_listing_days: 0
+  min_price: 0
+  liquidity:
+    min_turnover_twd_million: 0
+    min_days_traded_ratio: 0.0
+
+  # 只要求這兩個資料集到目前手上的最大日
+  need_prices_upto: "2025-10-02"
+  need_chip_upto:   "2025-10-02"
+
+  # 暫時不檢查以下兩個資料集
+  require_dividend: false
+  require_per: false

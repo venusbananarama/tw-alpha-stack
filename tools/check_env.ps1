@@ -1,3 +1,5 @@
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 param([switch]$FixPolicy)
 
 $ErrorActionPreference = "Stop"
@@ -42,3 +44,4 @@ $temp = [System.IO.Path]::GetTempFileName() + ".py"
 Set-Content -Path $temp -Value $code -Encoding UTF8
 & $python $temp
 Remove-Item $temp -Force
+

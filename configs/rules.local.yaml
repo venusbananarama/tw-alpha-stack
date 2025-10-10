@@ -1,0 +1,26 @@
+# ---- AlphaCity data requirements (overlay) ----
+requirements:
+  # 嚴格必需：這兩個要準時到最新交易日
+  required_datasets: [prices, chip]
+
+  # 可選：供應商缺料時不阻擋流程（僅做參考/記錄）
+  optional_datasets: [dividend, per]
+
+  # 時效目標（策略層參考）
+  need_prices_upto: latest
+  need_chip_upto: latest
+  allow_optional_lag_days:
+    dividend: 400        # 足夠長，避免短期異常誤擋
+    per: 4000
+
+gates:
+  freshness:
+    prices:   { max_lag_days: 0,    optional: false }
+    chip:     { max_lag_days: 0,    optional: false }
+    dividend: { max_lag_days: 9999, optional: true  }
+    per:      { max_lag_days: 9999, optional: true  }
+
+documentation:
+  notes:
+    - "FinMind 近期 dividend / PER 供應不穩，暫列 optional。"
+    - "Preflight 仍由腳本決定通過與否；此處僅作規則與期望之記錄。"

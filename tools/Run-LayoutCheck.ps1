@@ -1,3 +1,5 @@
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 $ErrorActionPreference = 'Stop'
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $LogDir   = Join-Path $RepoRoot 'logs'
@@ -28,3 +30,4 @@ $code = if ($ok) { 0 } else { 1 }
 $ts2 = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
 Add-Content -Path $LogFile -Value "$ts2 [END] ok=$ok code=$code"
 exit $code
+

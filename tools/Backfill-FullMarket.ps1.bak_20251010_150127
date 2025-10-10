@@ -1,0 +1,153 @@
+[CmdletBinding()]
+param(
+  [string]$RootPath = "C:\AI\tw-alpha-stack",
+  [string]$Start    = "",
+  [string]$End      = "",
+  [int]   $Batch    = 400,
+  [int]   $MaxRetries = 6,
+  [int]   $Workers  = 4,
+  [switch]$FillGaps,
+  [switch]$Force
+)
+Set-StrictMode -Vers
+# internal verbose flag (script-level)
+$showVerbose = $PSBoundParameters.ContainsKey('Verbose')
+ion Latest
+$ErrorActionPreference = 'Stop'
+Set-Location $RootPath
+
+if (-not $env:ALPHACITY_ALLOW -or $env:ALPHACITY_ALLOW -ne '1') {
+  throw "ALPHACITY_ALLOW != 1（請先：`$env:ALPHACITY_ALLOW='1'`）"
+}
+
+$PY = '.\.venv\Scripts\python.exe'
+if (-not (Test-Path -LiteralPath $PY)) { throw "Python not found: $PY" }
+
+$ts = Get-Date -Format 'yyyyMMdd_HHmmss'
+$repo = Join-Path $RootPath 'reports'
+New-Item -ItemType Directory -Force -Path $repo | Out-Null
+$log  = Join-Path $repo ("backfill_worker_{0}.log" -f $ts)
+
+function Log([string]$m){
+  $line = "[{0}] {1}" -f (Get-Date).ToString('s'), $m
+  $line | Tee-Object -FilePath $log -Append | Out-Null
+  if ($showVerbose) { Write-Host $line }
+}
+
+# 讀 preflight，供預設日窗
+& $PY .\scripts\preflight_check.py --rules .\rules.yaml --export .\reports --root . *>$null
+$pf = $null
+try { $pf = Get-Content .\reports\preflight_report.json -Raw | ConvertFrom-Json } catch {}
+$expect = $null
+if ($pf) {
+  if ($pf.meta -and $pf.meta.expect_date) { $expect = $pf.meta.expect_date }
+  elseif ($pf.expect_date) { $expect = $pf.expect_date }
+}
+
+function Get-DefaultWindow([string]$maxDate,[string]$expectDate){
+  if (-not $maxDate -or -not $expectDate) { return $null }
+  $d0 = [DateTime]::Parse($maxDate).AddDays(1).ToString('yyyy-MM-dd')
+  $d1 = [DateTime]::Parse($expectDate).ToString('yyyy-MM-dd') # End 不含
+  return @{ start=$d0; end=$d1 }
+}
+
+# 投資池（for chip/per）
+$universeFile = Join-Path $RootPath 'configs\investable_universe.txt'
+$POOL = @()
+if (Test-Path -LiteralPath $universeFile) {
+  $POOL = Get-Content -LiteralPath $universeFile | Where-Object { $_ -and -not $_.StartsWith('#') }
+  $POOL = $POOL | ForEach-Object { $_ -replace '\.TW$','' }
+  Log ("Universe loaded: {0} symbols" -f $POOL.Count)
+} else {
+  Log "Universe file not found: configs\investable_universe.txt"
+}
+
+# 執行一次 dataset 回補（datasets 用別名：prices/chip/per/dividend）
+function Invoke-Backfill([string]$dname,[string]$start,[string]$end,[string[]]$symbols,[int]$retryMax){
+  $args = @('.\scripts\finmind_backfill.py','--datasets', $dname,
+            '--start', $start, '--end', $end, '--datahub-root','datahub')
+  if ($symbols -and $symbols.Count -gt 0) {
+    $args += @('--symbols', ($symbols -join ','))
+  }
+  if ($Force)    { $args += '--force' }
+  if ($Workers -gt 0) { $args += @('--workers', "$Workers") }
+
+  $try=0; $ok=0
+  while ($try -lt $retryMax) {
+    $try++
+    try {
+      Log ("Run {0} try#{1}: {2}" -f $dname,$try, ($args -join ' '))
+      & $PY @args *>&1 | Tee-Object -FilePath $log -Append | Out-Null
+      $ok=1; break
+    } catch {
+      $msg = $_.Exception.Message
+      Log ("Error({0}) {1}" -f $dname,$msg)
+      if ($msg -match '402') {
+        $now  = Get-Date
+        $wait = ([DateTime]::Today.AddHours($now.Hour+1) - $now).TotalSeconds
+        $wait = [Math]::Min([int][Math]::Ceiling($wait), 3600)
+        Log ("HTTP 402: wait {0}s until next hour" -f $wait)
+        Start-Sleep -Seconds $wait
+      } else {
+        $backoff = (10,20,40,80,120)[[Math]::Min($try-1,4)]
+        Log ("Backoff {0}s" -f $backoff)
+        Start-Sleep -Seconds $backoff
+      }
+    }
+  }
+  return $ok
+}
+
+$summary = [ordered]@{}
+# 計算日窗
+$win_prices   = $null
+$win_chip     = $null
+$win_dividend = $null
+$win_per      = $null
+
+if ($Start -and $End) {
+  $win_prices   = @{ start=$Start; end=$End }
+  $win_chip     = @{ start=$Start; end=$End }
+  $win_dividend = @{ start=$Start; end=$End }
+  $win_per      = @{ start=$Start; end=$End }
+} elseif ($pf -and $expect) {
+  $win_prices   = Get-DefaultWindow $pf.freshness.prices.max_date   $expect
+  $win_chip     = Get-DefaultWindow $pf.freshness.chip.max_date     $expect
+  $win_dividend = Get-DefaultWindow $pf.freshness.dividend.max_date $expect
+  $win_per      = Get-DefaultWindow $pf.freshness.per.max_date      $expect
+} else {
+  throw "無法決定回補日窗：請傳 -Start/-End 或先產生 preflight_report.json"
+}
+
+function Run-One([string]$name,[hashtable]$win,[string[]]$syms){
+  if (-not $win) {
+    Log ("SKIP {0}: window=null" -f $name)
+    $summary[$name] = @{ status='skip'; reason='window=null' }; return
+  }
+  $st = $win.start; $ed = $win.end
+  $usePool = ($name -in @('chip','per')) -and ($POOL.Count -gt 0)
+
+  if ($usePool) {
+    $batch = [Math]::Max(1,$Batch)
+    for ($i=0; $i -lt $POOL.Count; $i+=$batch) {
+      $j=[Math]::Min($i+$batch-1,$POOL.Count-1)
+      $chunk=$POOL[$i..$j]
+      $ok = Invoke-Backfill $name $st $ed $chunk $MaxRetries
+      if (-not $ok) { $summary[$name] = @{ status='fail'; batch="$i..$j" }; return }
+    }
+    $summary[$name] = @{ status='ok'; batches=[int][Math]::Ceiling($POOL.Count/[double]$batch) }
+  } else {
+    $ok = Invoke-Backfill $name $st $ed @() $MaxRetries
+    $summary[$name] = @{ status= ($ok ? 'ok':'fail') }
+  }
+}
+
+Run-One 'prices'   $win_prices   $POOL
+Run-One 'chip'     $win_chip     $POOL
+Run-One 'per'      $win_per      $POOL
+Run-One 'dividend' $win_dividend $POOL
+
+$sumFile = Join-Path $repo ("backfill_summary_{0}.json" -f $ts)
+($summary | ConvertTo-Json -Depth 10) | Set-Content -LiteralPath $sumFile -Encoding utf8
+Log ("WROTE {0}" -f (Split-Path $sumFile -Leaf))
+

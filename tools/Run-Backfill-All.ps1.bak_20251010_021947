@@ -1,0 +1,59 @@
+param([string]$RootPath="C:\AI\tw-alpha-stack",[int]$Batch=400,[int]$MaxRetries=6,[switch]$FillGaps,[switch]$Force,[switch]$Verbose,[switch]$FailFast,[string]$End='')
+Set-StrictMode -Version Latest
+$ErrorActionPreference='Stop'
+Set-Location $RootPath
+if (-not $env:ALPHACITY_ALLOW -or $env:ALPHACITY_ALLOW -ne '1') { Write-Error "ALPHACITY_ALLOW != 1"; exit 1 }
+$ts=(Get-Date).ToString('yyyyMMdd_HHmmss')
+$runLog=Join-Path $RootPath ("reports\run_backfill_all_$ts.log")
+function RunLog([string]$m){ $line = "[{0}] {1}" -f (Get-Date).ToString('s'), $m; $line|Tee-Object -FilePath $runLog -Append | Out-Null; if ($Verbose){ Write-Host $line } }
+$PY='.\\.venv\\Scripts\\python.exe'
+if (-not (Test-Path $PY)) { RunLog "Python not found"; exit 3 }
+
+RunLog "RUN preflight_check.py (before)"
+& $PY .\scripts\preflight_check.py --rules .\rules.yaml --export .\reports --root . 2>&1 | Tee-Object -FilePath $runLog -Append | Out-Null
+$pf_before_raw = Get-Content .\reports\preflight_report.json -Raw
+try{ $pf_before = $pf_before_raw | ConvertFrom-Json } catch { $pf_before = $null }
+$expect_date = $null
+if ($pf_before -and $pf_before.meta -and $pf_before.meta.expect_date){ $expect_date=$pf_before.meta.expect_date } elseif ($pf_before -and $pf_before.expect_date) { $expect_date=$pf_before.expect_date }
+if ($End) { $expect_date = $End }
+if (-not $expect_date) { RunLog "Cannot determine expect_date"; exit 4 }
+RunLog "Using expect_date = $expect_date"
+RunLog ("PREFLIGHT BEFORE -> prices={0} chip={1} per={2} dividend={3}" -f $pf_before.freshness.prices.max_date,$pf_before.freshness.chip.max_date,$pf_before.freshness.per.max_date,$pf_before.freshness.dividend.max_date)
+
+# Worker call（正確：pwsh -File + Redirect）
+$workerPath   = Join-Path $RootPath 'tools\Backfill-FullMarket.ps1'
+if (-not (Test-Path $workerPath)) { RunLog "Worker not found: $workerPath"; exit 2 }
+$workerStdout = Join-Path $RootPath ("reports\backfill_worker_stdout_$ts.log")
+$workerStderr = Join-Path $RootPath ("reports\backfill_worker_stderr_$ts.log")
+
+$argList = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$workerPath,'-RootPath',$RootPath,'-Batch',"$Batch")
+if ($FillGaps) { $argList += '-FillGaps' }
+if ($Force)    { $argList += '-Force' }
+if ($Verbose)  { $argList += '-Verbose' }
+RunLog ("Calling worker: pwsh " + ($argList -join ' '))
+
+$proc = Start-Process -FilePath 'pwsh' -ArgumentList $argList `
+         -Wait -PassThru -NoNewWindow `
+         -RedirectStandardOutput $workerStdout `
+         -RedirectStandardError  $workerStderr
+$exitCode = $proc.ExitCode
+RunLog "Worker exit code = $exitCode. Stdout -> $(Split-Path $workerStdout -Leaf); Stderr -> $(Split-Path $workerStderr -Leaf)"
+
+# collect worker summary（若存在）
+$workerSummaryFile = Get-ChildItem -Path (Join-Path $RootPath 'reports') -Filter 'backfill_summary_*.json' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$workerSummary = $null
+if ($workerSummaryFile) { try { $workerSummary = Get-Content $workerSummaryFile.FullName -Raw | ConvertFrom-Json } catch {} }
+
+$runSummary = [ordered]@{ run_ts=$ts; expect_date=$expect_date; worker_exit=$exitCode; worker_summary=$workerSummary }
+$runSummaryFile = Join-Path $RootPath ("reports\backfill_summary_run_$ts.json")
+$runSummary | ConvertTo-Json -Depth 10 | Out-File -FilePath $runSummaryFile -Encoding utf8
+RunLog "Wrote run summary $runSummaryFile"
+
+RunLog "RUN final preflight_check.py (after)"
+& $PY .\scripts\preflight_check.py --rules .\rules.yaml --export .\reports --root . 2>&1 | Tee-Object -FilePath $runLog -Append | Out-Null
+$pf_after_raw = Get-Content .\reports\preflight_report.json -Raw
+try{ $pf_after = $pf_after_raw | ConvertFrom-Json } catch { $pf_after = $null }
+RunLog ("PREFLIGHT AFTER  -> prices={0} chip={1} per={2} dividend={3}" -f $pf_after.freshness.prices.max_date,$pf_after.freshness.chip.max_date,$pf_after.freshness.per.max_date,$pf_after.freshness.dividend.max_date)
+
+RunLog "Run-Backfill-All DONE"
+if ($exitCode -ne 0) { exit $exitCode } else { exit 0 }

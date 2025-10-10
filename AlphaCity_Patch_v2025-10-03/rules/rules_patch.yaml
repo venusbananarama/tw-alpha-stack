@@ -1,0 +1,39 @@
+# 將以下段落合併進既有 rules.yaml 對應節點（鍵名一致即可，不必同序）
+
+validation:
+  dsr_min_after_costs: 0.0
+  psr_min: 0.9
+  t_min: 2
+
+alpha_quality:
+  rank_ic_weekly_min: 0.03
+
+execution_checks:
+  replay_mae_bps_max: 2  # 單位：bps，滑價回放 MAE 門檻
+
+execution:
+  pov: 0.05  # 參與率上限（模擬 POV 拆單）
+  limit_protect:
+    atr_mul: 2.0  # 以 ATR 倍數限制下單價格偏離
+  auction:
+    enable_open_close: true
+    max_participation: 0.10
+
+portfolio:
+  position:
+    max_weight: 0.05
+  liquidity:
+    max_adv_part: 0.05
+  industry_neutral: true
+
+deep:
+  uncertainty_output: [p05, p50, p95]
+
+ssot:
+  wf_pass_min: 0.80
+  leverage_cap: 1.3
+
+live_controls:
+  killswitch:
+    dd_soft: -0.10
+    dd_hard: -0.15

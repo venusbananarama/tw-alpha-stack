@@ -1,0 +1,11 @@
+# 可選：把此段併入你的策略/回測配置
+execution:
+  pov: 0.05
+  limit_protect:
+    atr_mul: 2.0
+  auction:
+    enable_open_close: true
+    max_participation: 0.10
+
+execution_checks:
+  replay_mae_bps_max: 2

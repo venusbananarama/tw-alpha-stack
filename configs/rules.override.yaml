@@ -1,0 +1,5 @@
+preflight:
+  core_max_lag_days: 1
+  dividend_max_lag_days: 365
+  per_max_lag_days: 365
+  weekend_pass: true

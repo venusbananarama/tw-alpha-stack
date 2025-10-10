@@ -1,3 +1,5 @@
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 param([string[]]$Datasets,[string]$Root="C:\AI\tw-alpha-stack")
 Import-Module powershell-yaml -ErrorAction Stop
 $path = ".\configs\datasets.registry.yaml"
@@ -24,3 +26,4 @@ if ($out -notmatch 'EstCalls=\d+') { throw "Preflight cannot read EstCalls. Raw:
 $est = [int]([regex]::Match($out,'EstCalls=(\d+)').Groups[1].Value)
 if ($est -le 0) { throw "Preflight EstCalls=$est (no work planned)." }
 "Preflight OK (EstCalls=$est)"
+

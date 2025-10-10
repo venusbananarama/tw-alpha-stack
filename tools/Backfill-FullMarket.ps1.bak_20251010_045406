@@ -1,0 +1,164 @@
+param(
+  [string]$RootPath = "C:\AI\tw-alpha-stack",
+  [int]   $Batch    = 400,
+  [int]   $MaxRetries = 6,
+  [string]$Start    = "",
+  [string]$End      = "",
+  [switch]$FillGaps,
+  [switch]$Force,
+  [switch]$Verbose
+)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+Set-Location $RootPath
+
+if (-not $env:ALPHACITY_ALLOW -or $env:ALPHACITY_ALLOW -ne '1') {
+  throw "ALPHACITY_ALLOW != 1 (set ALPHACITY_ALLOW=1 then retry)."
+}
+
+$PY = Join-Path $RootPath '.\.venv\Scripts\python.exe'
+if (-not (Test-Path $PY)) { throw "Python venv not found at ${PY}" }
+
+$Reports   = Join-Path $RootPath 'reports'
+$DataRoot  = Join-Path $RootPath 'datahub'
+$UniFile1  = Join-Path $RootPath 'configs\investable_universe.txt'
+$UniFile2  = Join-Path $RootPath 'configs\universe.tw_all.txt'
+$UniFile   = if (Test-Path $UniFile1) { $UniFile1 } elseif (Test-Path $UniFile2) { $UniFile2 } else { "" }
+New-Item -ItemType Directory -Force -Path $Reports | Out-Null
+
+function Log([string]$msg) {
+  $line = "[{0}] {1}" -f (Get-Date).ToString('s'), $msg
+  Write-Host $line
+  $line | Out-File (Join-Path $Reports 'backfill_worker.log') -Encoding utf8 -Append
+}
+
+function Normalize-Symbol([string]$s){
+  if (-not $s) { return $null }
+  $t = $s.Trim()
+  if ($t -match '^\d{4}\.TW$') { return $t.Substring(0,4) }
+  if ($t -match '^\d{4}$')     { return $t }
+  return $null
+}
+
+$SYMS = @()
+if ($UniFile -and (Test-Path $UniFile)) {
+  $SYMS = Get-Content $UniFile | ForEach-Object { Normalize-Symbol $_ } | Where-Object { $_ }
+  if (-not $SYMS) { throw "Universe file exists but contains no valid symbols: ${UniFile}" }
+  Log "Universe loaded: ${UniFile} (N=$($SYMS.Count))"
+} else {
+  Log "Universe file not found; will require --symbols where applicable."
+}
+
+# --- Preflight 前置：拿 expect_date 與 freshness ---
+& $PY .\scripts\preflight_check.py --rules .\rules.yaml --export .\reports --root . | Out-Null
+$pf_raw = Get-Content (Join-Path $Reports 'preflight_report.json') -Raw
+try { $pf = $pf_raw | ConvertFrom-Json } catch { $pf = $null }
+
+$expect_date = $null
+if ($pf -and $pf.meta -and $pf.meta.expect_date) { $expect_date = $pf.meta.expect_date }
+elseif ($pf -and $pf.expect_date)                { $expect_date = $pf.expect_date }
+
+if ($End) { $expect_date = $End }
+if (-not $expect_date) { throw "Cannot determine expect_date. Supply -End or run preflight successfully." }
+
+function _Plus1Day([string]$yymmdd){
+  if (-not $yymmdd) { return $null }
+  try { return (([datetime]$yymmdd).AddDays(1)).ToString('yyyy-MM-dd') } catch { return $null }
+}
+
+$fresh = $pf.freshness
+$win = [ordered]@{}
+$win['prices']   = @{
+  start = if ($Start) { $Start } else { _Plus1Day($fresh.prices.max_date) }
+  end   = $expect_date
+}
+$win['chip']     = @{
+  start = if ($Start) { $Start } else { _Plus1Day($fresh.chip.max_date) }
+  end   = $expect_date
+}
+$win['per']      = @{
+  start = if ($Start) { $Start } else { _Plus1Day($fresh.per.max_date) }
+  end   = $expect_date
+}
+# dividend：事件窗；若 freshness 不明，用 End-30d
+$divStartDefault = if ($fresh.dividend.max_date) { _Plus1Day($fresh.dividend.max_date) } else { (([datetime]$expect_date).AddDays(-30)).ToString('yyyy-MM-dd') }
+$win['dividend'] = @{
+  start = if ($Start) { $Start } else { $divStartDefault }
+  end   = $expect_date
+}
+
+# FillGaps：交給 Python 端的日索引 gating 處理（這裡不拆日迴圈，避免重覆打）
+if ($FillGaps) { Log "FillGaps=ON (day-index gating handled by finmind_backfill.py)" }
+
+# --- 重試/退避 ---
+function Invoke-PyBackfill([string]$dataset, [string[]]$symbols, [string]$st, [string]$ed){
+  $ts = Get-Date -Format yyyyMMdd_HHmmss
+  $stdout = Join-Path $Reports ("py_${dataset}_$ts.out.log")
+  $stderr = Join-Path $Reports ("py_${dataset}_$ts.err.log")
+
+  $args = @('.\scripts\finmind_backfill.py','--datasets', $dataset, '--start', $st, '--end', $ed, '--datahub-root', 'datahub')
+  if ($symbols -and $symbols.Count -gt 0) { $args += @('--symbols', ($symbols -join ',')) }
+  if ($Force) { $args += '--force' }
+
+  $tries = 0
+  $delay = 10
+  while ($true) {
+    $tries++
+    Log "RUN[$tries] ${dataset} $(if($symbols){'symbols='+$symbols.Count}else{'(all)'}) ${st}..(excl)${ed}"
+    $p = Start-Process -FilePath $PY -ArgumentList $args -Wait -PassThru -NoNewWindow `
+          -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    $code = $p.ExitCode
+    $errt = (Get-Content $stderr -ErrorAction SilentlyContinue -Raw)
+    $has402 = ($errt -match '(^|\s)(402|429)(\s|$)') -or ((Get-Content $stdout -Raw -ErrorAction SilentlyContinue) -match '(^|\s)(402|429)(\s|$)')
+
+    if ($code -eq 0) { Log "OK ${dataset} exit=0 → $([IO.Path]::GetFileName($stdout))"; break }
+    if ($has402) {
+      # 等到下一整點再跑
+      $now = Get-Date
+      $nextHour = Get-Date -Hour ($now.Hour+1) -Minute 0 -Second 5
+      $waitSec = [int]($nextHour - $now).TotalSeconds
+      Log "HTTP 402/429 detected → sleep ${waitSec}s to next hour"
+      Start-Sleep -Seconds $waitSec
+      continue
+    }
+    if ($tries -ge $MaxRetries) {
+      Log "FAIL ${dataset} after ${tries} tries (last exit=$code). See $([IO.Path]::GetFileName($stderr))"
+      throw "Backfill failed: ${dataset}"
+    }
+    Log "RETRY ${dataset} in ${delay}s (exit=$code)"
+    Start-Sleep -Seconds $delay
+    $delay = [Math]::Min($delay * 2, 120)
+  }
+}
+
+# --- 依資料集跑：prices/chip/per/dividend ---
+foreach ($dname in @('prices','chip','per','dividend')) {
+  $dstart = $win[$dname].start
+  $dend   = $win[$dname].end
+  if (-not $dstart) { Log "SKIP ${dname}: start=null"; continue }
+  if (-not $dend)   { Log "SKIP ${dname}: end=null";   continue }
+
+  # 資料集對應：prices/chip/per/dividend → finmind_backfill.py 內部會映射到各 FinMind dataset
+  $useSymbols = $SYMS
+  # 允許 prices/dividend 也切批（更穩健）
+  $chunks = if ($useSymbols -and $useSymbols.Count -gt 0) {
+    0..([math]::Ceiling($useSymbols.Count / $Batch)-1) | ForEach-Object {
+      $s = $_ * $Batch
+      $e = [Math]::Min($s + $Batch - 1, $useSymbols.Count - 1)
+      ,($useSymbols[$s..$e])
+    }
+  } else {
+    ,(@())  # 空陣列→由 Python 端決定全市場
+  }
+
+  $i = 0
+  foreach ($chunk in $chunks) {
+    $i++
+    if ($chunk.Count -gt 0) { Log "[$dname] batch $i/$($chunks.Count) size=$($chunk.Count)" }
+    Invoke-PyBackfill -dataset $dname -symbols $chunk -st $dstart -ed $dend
+    if ($chunks.Count -gt 1) { Start-Sleep -Seconds 3 }
+  }
+}
+
+Log "Backfill-FullMarket DONE."
+exit 0

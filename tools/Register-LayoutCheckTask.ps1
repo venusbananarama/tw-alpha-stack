@@ -1,3 +1,5 @@
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 $ErrorActionPreference = 'Stop'
 
 # 路徑與日誌
@@ -19,3 +21,4 @@ $code = if ($LASTEXITCODE -ne $null) { $LASTEXITCODE } else { 0 }
 $ts2 = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
 Add-Content -Path $logFile -Value "$ts2 [END] code=$code"
 exit $code
+
