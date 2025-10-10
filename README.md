@@ -1,0 +1,2 @@
+# fatai
+stock
