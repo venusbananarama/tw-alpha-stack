@@ -40,7 +40,7 @@ RunPy @('scripts/finmind_backfill.py','--start','2018-01-01','--end',$today,'--d
   '--workers','6','--qps','1.6','--sentinel-safe') | Out-Null
 
 Write-Host '[S2] Universe'
-RunPy @('scripts/build_universe.py','--drop-empty','--rules',$Rules) | Out-Null
+RunPy @('scripts/build_universe.py','--rules',$Rules) | Out-Null
 
 if ($env:SKIP_SMOKE -eq '1') {
   Write-Host '[S3] Smoke skipped'
@@ -71,4 +71,5 @@ if (Test-Path $Emit) { RunPy @('scripts/emit_reports.py','--rules',$Rules,'--out
 
 Write-Host '[Run-Daily] Done.'
 exit 0
+
 

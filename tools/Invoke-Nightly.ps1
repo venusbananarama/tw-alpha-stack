@@ -84,19 +84,18 @@ try {
   _Echo "Preflight → preflight_check.py"
   & $PythonExe (Join-Path $Root 'scripts\preflight_check.py') --rules $EffectiveRules --export $ReportsDir --root $Root
 
-  # 7) Build Universe（若舊版 argparse 不支援 --drop-empty，偵測後自動移除重跑）
+  # 7) Build Universe（若舊版 argparse 不支援，偵測後自動移除重跑）
   _Echo "Build Universe → build_universe.py"
   $argBuild = @(
     (Join-Path $Root 'scripts\build_universe.py'),
     '--config', (Join-Path $Root 'configs\universe.yaml'),
     '--rules',  $EffectiveRules,
-    '--out',    (Join-Path $Root 'configs\investable_universe.txt'),
-    '--drop-empty'
+    '--out',    (Join-Path $Root 'configs\investable_universe.txt')
   )
   & $PythonExe @argBuild; $rc=$LASTEXITCODE
   if ($rc -ne 0) {
-    Write-Warning ("build_universe.py exit={0}，嘗試移除 --drop-empty 後重跑（相容舊版）。" -f $rc)
-    $argBuild = $argBuild | Where-Object { $_ -ne '--drop-empty' }
+    Write-Warning ("build_universe.py exit={0}，嘗試移除 後重跑（相容舊版）。" -f $rc)
+    $argBuild = $argBuild | Where-Object { $_ -ne 0}
     & $PythonExe @argBuild
   }
 
@@ -120,3 +119,10 @@ try {
 finally {
   try { Stop-Transcript | Out-Null } catch { }
 }
+
+
+
+
+
+
+

@@ -1,0 +1,80 @@
+# coding: utf-8
+import sys, os, subprocess
+from datetime import datetime, timedelta
+
+def run(cmd):
+    return subprocess.run(cmd).returncode
+
+argv = sys.argv[1:]
+script_dir = os.path.dirname(os.path.abspath(__file__))
+orig = os.path.join(script_dir, "fm_dateid_fetch.py")
+
+def passthru():
+    return run([sys.executable, orig] + argv)
+
+def get_arg(name, default=None):
+    try:
+        i = argv.index(name)
+    except ValueError:
+        return default
+    return argv[i+1] if i+1 < len(argv) else default
+
+def set_or_add_arg(args, flag, value):
+    if flag in args:
+        j = args.index(flag)
+        if j+1 < len(args):
+            args[j+1] = value
+        else:
+            args += [flag, value]
+    else:
+        args += [flag, value]
+    return args
+
+# 1) 解析 dataset/strict
+datasets = []
+ds = get_arg("--datasets") or get_arg("--dataset")
+if ds:
+    datasets = [x.strip() for x in ds.split(",") if x.strip()]
+strict = ("--strict" in argv)
+
+# 非 ParValueChange 直接 pass-through
+if not any(d in ("TaiwanStockParValueChange","TaiwanStockShareholding") for d in datasets):
+    sys.exit(passthru())
+
+# 2) 先嘗試整段；成功就結束
+rc = passthru()
+if rc == 0:
+    sys.exit(0)
+
+# 3) 整段失敗 → 單日 fallback（寬鬆模式將盡量把能補的全補上）
+start = get_arg("--start")
+end = get_arg("--end")
+if not start or not end:
+    sys.exit(rc)  # 無法切日，沿用原始 rc
+
+fmt = "%Y-%m-%d"
+try:
+    s = datetime.strptime(start, fmt)
+    e = datetime.strptime(end, fmt)
+except Exception:
+    sys.exit(rc)
+
+delta_days = max((e - s).days, 1)
+any_failed = False
+for i in range(delta_days):
+    d1 = s + timedelta(days=i)
+    d2 = d1 + timedelta(days=1)
+    args = list(argv)
+    args = set_or_add_arg(args, "--start", d1.strftime(fmt))
+    args = set_or_add_arg(args, "--end",   d2.strftime(fmt))
+    rc1 = run([sys.executable, orig] + args)
+    if rc1 != 0:
+        any_failed = True
+        if strict:
+            sys.exit(rc1)
+        else:
+            sys.stderr.write(f"[WARN] TaiwanStockParValueChange daily fetch failed for {d1.strftime(fmt)} (exit={rc1})\\n")
+
+# 4) fallback 結果回報：
+sys.exit(0 if not any_failed else 1)
+

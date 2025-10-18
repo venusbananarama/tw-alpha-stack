@@ -1,0 +1,232 @@
+param(
+  [Parameter(Mandatory=$true)][datetime]$Start,
+  [datetime]$End,
+  [int]$WindowDays = 14,
+  [int]$Workers = 3,
+  [int]$BatchSize = 400,
+  [int]$ThrottleRPM = 8,
+  [int]$MaxRPM = 100,
+  [int]$StepRPM = 8,
+  [int]$RampEveryWins = 4,
+  [int]$BackoffSeconds = 600,
+  [int]$MaxBackoffSeconds = 3600,
+  [int]$MaxRetriesPerWin = 6,
+  [string]$Tag = 'S1_hist',
+  [string]$Group = 'ALL',
+  [switch]$SmartSkip,
+  [int]$SkipM = 12,
+  [int]$SkipJumpYears = 2,
+  [switch]$UseCheckpoint,
+  [string]$CheckpointPath = '.\state\dateid_checkpoint.json',
+  [switch]$NoLock,
+  [int]$LockStaleMinutes = 30,
+  [switch]$Strict
+)
+
+$ErrorActionPreference = 'Stop'
+
+function Resolve-Root {
+  if($env:ALPHACITY_ROOT){
+    $c=$env:ALPHACITY_ROOT
+    $hasTools   = Test-Path (Join-Path $c 'tools')
+    $hasConfigs = Test-Path (Join-Path $c 'configs')
+    if($hasTools -and $hasConfigs){ return (Resolve-Path $c).Path }
+  }
+  $d = Split-Path -Parent $PSCommandPath
+  if([string]::IsNullOrWhiteSpace($d)){ $d = (Get-Location).Path }
+  $cur = Get-Item $d
+  for($i=0;$i -lt 6 -and $cur;$i++){
+    $hasTools   = Test-Path (Join-Path $cur.FullName 'tools')
+    $hasConfigs = Test-Path (Join-Path $cur.FullName 'configs')
+    if($hasTools -and $hasConfigs){ return $cur.FullName }
+    $cur = $cur.Parent
+  }
+  return (Resolve-Path '.').Path
+}
+
+$root       = Resolve-Root
+$toolsDir   = Join-Path $root 'tools'
+$reportsDir = Join-Path $root 'reports'
+$stateDir   = Join-Path $root 'state'
+$wrapPath   = Join-Path $stateDir 'engine_transcript_wrapper.ps1'
+New-Item -ItemType Directory -Force -Path $reportsDir,$stateDir | Out-Null
+
+# Log 檔名（時間戳）
+$ts  = Get-Date -Format 'yyyyMMdd_HHmmss'
+$log = Join-Path $reportsDir ("fullmarket_maxrate_{0}_{1}.log" -f $Tag,$ts)
+
+"[ROOT] $root" | Tee-Object -FilePath $log -Append | Out-Host
+"Log: $log"     | Tee-Object -FilePath $log -Append | Out-Host
+
+# Engine 定位（正名→shim）
+$engine = @('Run-FullMarket-DateID-MaxRate.ps1','Run-FullMarket-DateIDMaxRate.ps1') |
+  ForEach-Object { Join-Path -Path $toolsDir -ChildPath $_ } |
+  Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if(-not $engine){ "[Error] engine not found under $toolsDir" | Tee-Object -FilePath $log -Append | Out-Host; exit 2 }
+"[Engine] $engine" | Tee-Object -FilePath $log -Append | Out-Host
+
+# Group 與 Universe
+$groupFile = Join-Path (Join-Path $root 'configs\groups') ("{0}.txt" -f $Group)
+if(-not (Test-Path $groupFile)){ throw "Group file not found: $groupFile" }
+$all = Get-Content $groupFile | Where-Object { $_ -match '^\s*\d{4}\s*$' } | ForEach-Object { $_.Trim() }
+$ids = $all
+$uniFile = Join-Path $root 'configs\investable_universe.txt'
+if(Test-Path $uniFile){
+  $u = Get-Content $uniFile | Where-Object { $_ -match '^\s*\d{4}\s*$' } | ForEach-Object { $_.Trim() }
+  $ids = $all | Where-Object { $u -contains $_ }
+}
+"[GroupCheck] $Group.txt 行數=$($all.Count) sample=$((($all | Select-Object -First 5) -join ','))" | Tee-Object -FilePath $log -Append | Out-Host
+"[GroupCheck] 與 Universe 交集後 N=$($ids.Count)" | Tee-Object -FilePath $log -Append | Out-Host
+
+# 鎖檔
+$lockFile = Join-Path $stateDir 'Run-Max-Recent.lock'
+if(-not $NoLock){
+  if(Test-Path $lockFile){
+    try{
+      $j = Get-Content $lockFile -Raw | ConvertFrom-Json
+      $age = if($j.ts){ [int]((Get-Date) - [datetime]$j.ts).TotalMinutes } else { 999 }
+      $alive=$false; if($j.pid){ $alive=[bool](Get-Process -Id $j.pid -ErrorAction SilentlyContinue) }
+      if($alive -and $age -lt $LockStaleMinutes){ "lock active: $lockFile (pid=$($j.pid) tag=$($j.tag))" | Tee-Object -FilePath $log -Append | Out-Host; exit 1 }
+    }catch{}
+    Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
+  }
+  @{ ts=(Get-Date).ToString('s'); pid=$PID; tag=$Tag } | ConvertTo-Json | Set-Content $lockFile -Encoding UTF8
+}
+
+function Set-RPM([int]$rpm){
+  if($rpm -lt 1){ $rpm = 1 }
+  $env:FINMIND_THROTTLE_RPM = "$rpm"
+  "[Ramp] FINMIND THROTTLE RPM=$rpm" | Tee-Object -FilePath $log -Append | Out-Host
+}
+function Has402([string[]]$lines){
+  foreach($l in $lines){
+    if($l -match 'HTTP\s+402' -or $l -match 'StatusCode:\s*402' -or $l -match 'Payment Required'){ return $true }
+  } $false
+}
+
+Set-RPM $ThrottleRPM
+$wStart    = [datetime]$Start
+$wEndLimit = if($PSBoundParameters.ContainsKey('End')){ [datetime]$End } else { Get-Date }
+$successfulWins = 0
+$backoff = [Math]::Max(1,$BackoffSeconds)
+$StrictFlag = $Strict.IsPresent
+$emptyWins = 0
+
+try{
+  while($wStart -lt $wEndLimit){
+    $winDays = ($wEndLimit - $wStart).Days
+    if($WindowDays -lt 1){ $WindowDays = 1 }
+    $wEnd = $wStart.AddDays([Math]::Min($WindowDays, $winDays))
+    if($wEnd -gt $wEndLimit){ $wEnd = $wEndLimit }
+    if(($wEnd - $wStart).Days -lt 1){ $wEnd = $wStart.AddDays(1) }   # 保證 win>=1
+
+    "=== {0} -> {1} === IDs~{2} rpm={3}" -f $wStart.ToString('yyyy-MM-dd'),$wEnd.ToString('yyyy-MM-dd'),$ids.Count,$env:FINMIND_THROTTLE_RPM | Tee-Object -FilePath $log -Append | Out-Host
+
+    $engineArgs = @(
+      '-Start', $wStart.ToString('yyyy-MM-dd'),
+      '-BatchSize', $BatchSize,
+      '-WindowDays', ($wEnd - $wStart).Days,
+      '-Workers', $Workers
+    )
+    if($StrictFlag){ $engineArgs += '-Strict' }
+
+    $attempt = 0
+    $done = $false
+    while(-not $done){
+      $attempt++
+      "[Invoke] engine: $engine start=$($wStart.ToString('yyyy-MM-dd')) win=$((($wEnd-$wStart).Days)) workers=$Workers batch=$BatchSize try=$attempt" | Tee-Object -FilePath $log -Append | Out-Host
+
+      # 段落標記，便於事後抽取 wrapper 期間的輸出
+      $segId = [Guid]::NewGuid().ToString('N')
+      $segBegin = "[ENGINE_SEGMENT_BEGIN] id=$segId"
+      $segEnd   = "[ENGINE_SEGMENT_END] id=$segId"
+      Add-Content -Path $log -Value $segBegin
+
+      # 以 Wrapper 把引擎所有輸出流「即時」寫入 *同一個* $log；外層在此期間不寫 $log，避免鎖衝突
+      & pwsh -NoProfile -ExecutionPolicy Bypass -File $wrapPath -EnginePath $engine -LogPath $log @engineArgs
+      $exit = $LASTEXITCODE
+
+      Add-Content -Path $log -Value $segEnd
+
+      # 從 log 尾端抽取本次段落內容，做 402/Ramp 判斷（避免 -Variable/-FilePath 參數集衝突）
+      $tail = Get-Content -Path $log -Tail 20000
+      $startObj = $tail | Select-String -SimpleMatch $segBegin | Select-Object -Last 1
+      $endObj   = $tail | Select-String -SimpleMatch $segEnd   | Select-Object -Last 1
+      $out = @()
+      if($startObj -and $endObj -and $endObj.LineNumber -gt $startObj.LineNumber){
+        $out = $tail[ $startObj.LineNumber .. ($endObj.LineNumber - 2) ]
+      }
+
+      "[Invoke] exit=$exit lines=$($out.Count)" | Tee-Object -FilePath $log -Append | Out-Host
+
+      $had402 = ($out.Count -gt 0) -and (Has402 $out)
+      if($had402){
+        $new = [int]([int]$env:FINMIND_THROTTLE_RPM/2); if($new -lt 1){ $new = 1 }
+        "[Backoff] HTTP 402 → sleep $backoff s ; rpm $($env:FINMIND_THROTTLE_RPM) → $new" | Tee-Object -FilePath $log -Append | Out-Host
+        Set-RPM $new
+        Start-Sleep -Seconds $backoff
+        if($backoff -lt $MaxBackoffSeconds){ $backoff = [Math]::Min($MaxBackoffSeconds, [int]([double]$backoff*1.5)) }
+        if($attempt -lt $MaxRetriesPerWin){ continue } else {
+          "[Backoff] Max retries reached → skip window" | Tee-Object -FilePath $log -Append | Out-Host
+          $successfulWins = 0
+          $done = $true
+        }
+      } else {
+        $backoff = $BackoffSeconds
+        $successfulWins++
+        if($RampEveryWins -gt 0 -and $successfulWins % $RampEveryWins -eq 0 -and [int]$env:FINMIND_THROTTLE_RPM -lt $MaxRPM){
+          $next = [Math]::Min($MaxRPM, [int]$env:FINMIND_THROTTLE_RPM + $StepRPM)
+          if($next -ne [int]$env:FINMIND_THROTTLE_RPM){
+            "[Ramp] Increasing rpm from $($env:FINMIND_THROTTLE_RPM) to $next" | Tee-Object -FilePath $log -Append | Out-Host
+            Set-RPM $next
+          }
+        }
+        $done = $true
+      }
+    } # retry
+
+    # SmartSkip（若引擎有輸出 rows= 或 total_rows= 更準確；此處僅以段落內是否有內容粗估）
+    if($SmartSkip){
+      $hasRows = $false
+      foreach($l in $out){
+        if($l -match 'total_rows\s*=\s*(\d+)' -or $l -match '\brows\s*=\s*(\d+)'){ if([int]$Matches[1] -gt 0){ $hasRows=$true; break } }
+      }
+      if($hasRows){ $emptyWins = 0 } else { $emptyWins++ }
+      if($emptyWins -ge $SkipM){
+        "[SmartSkip] empty $SkipM windows -> +$SkipJumpYears y: $($wStart.ToString('yyyy')) -> $($wStart.AddYears($SkipJumpYears).ToString('yyyy'))" | Tee-Object -FilePath $log -Append | Out-Host
+        $wStart = $wStart.AddYears($SkipJumpYears); $emptyWins = 0; continue
+      }
+    }
+
+    if($UseCheckpoint){
+      $ckPath = if([IO.Path]::IsPathRooted($CheckpointPath)){ $CheckpointPath } else { Join-Path $root $CheckpointPath }
+      $ckDir  = Split-Path -Parent $ckPath
+      if(-not (Test-Path $ckDir)){ New-Item -ItemType Directory -Force -Path $ckDir | Out-Null }
+      [pscustomobject]@{ updated=(Get-Date).ToString('o'); tag=$Tag; group=$Group; last_end=$wEnd.ToString('yyyy-MM-dd') } |
+        ConvertTo-Json | Set-Content -Path $ckPath -Encoding UTF8
+    }
+
+    $wStart = $wEnd
+  }
+
+  "S1 batch DONE" | Tee-Object -FilePath $log -Append | Out-Host
+} # end try block
+
+# A try block in PowerShell must be paired with a catch or finally.  Add a no-op catch
+# here so that the outer try is syntactically valid.  The catch simply rethrows
+# any exception so that the script fails fast.
+catch {
+    throw
+}
+# Always attempt to remove the lock file when we exit the try regardless of error state.
+finally {
+  if(-not $NoLock -and (Test-Path $lockFile)){
+    try{
+      $j = Get-Content $lockFile -Raw | ConvertFrom-Json
+      if($j -and $j.pid -eq $PID){ Remove-Item $lockFile -Force }
+    }catch{
+      # if conversion fails or fields are missing, still remove the lock
+      Remove-Item $lockFile -Force
+    }
+  }
+}

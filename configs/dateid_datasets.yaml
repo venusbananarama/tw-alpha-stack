@@ -1,0 +1,31 @@
+# configs\dateid_datasets.yaml
+datasets:
+  # --- Technical / Price family ---
+  - { table: TaiwanStockPrice,                  id_key: stock_id }
+  - { table: TaiwanStockWeekPrice,              id_key: stock_id }
+  - { table: TaiwanStockMonthPrice,             id_key: stock_id }
+  - { table: TaiwanStockPriceAdj,               id_key: stock_id }
+  - { table: TaiwanStockPriceTick,              id_key: stock_id }
+  - { table: TaiwanStockPER,                    id_key: stock_id }
+  - { table: TaiwanStockDayTrading,             id_key: stock_id }
+  - { table: TaiwanStock10Year,                 id_key: stock_id }
+  - { table: TaiwanStockKBar,                   id_key: data_id }
+  # --- Chip ---
+  - { table: TaiwanStockMarginPurchaseShortSale,        id_key: stock_id }
+  - { table: TaiwanStockInstitutionalInvestorsBuySell,  id_key: stock_id }
+  - { table: TaiwanStockShareholding,                   id_key: data_id }
+  - { table: TaiwanStockSecuritiesLending,              id_key: stock_id }
+  - { table: TaiwanDailyShortSaleBalances,              id_key: stock_id }
+  # --- Fundamental ---
+  - { table: TaiwanStockFinancialStatements,            id_key: stock_id }
+  - { table: TaiwanStockBalanceSheet,                   id_key: stock_id }
+  - { table: TaiwanStockCashFlowsStatement,             id_key: stock_id }
+  - { table: TaiwanStockDividend,                       id_key: stock_id }
+  - { table: TaiwanStockDividendResult,                 id_key: stock_id }
+  - { table: TaiwanStockMonthRevenue,                   id_key: stock_id }
+  - { table: TaiwanStockCapitalReductionReferencePrice, id_key: stock_id }
+  - { table: TaiwanStockMarketValue,                    id_key: stock_id }
+  - { table: TaiwanStockMarketValueWeight,              id_key: stock_id }
+  - { table: TaiwanStockSplitPrice,                     id_key: stock_id }
+  - { table: TaiwanStockParValueChange,                 id_key: stock_id }
+  - { table: TaiwanStockDelisting,                      id_key: stock_id }

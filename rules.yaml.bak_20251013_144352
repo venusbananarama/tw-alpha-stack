@@ -1,0 +1,63 @@
+# gptcodex / SSOT Phase1
+calendar:
+  weekly_anchor: W-FRI
+  timezone: Asia/Taipei
+
+delays:
+  chip: "T+1"
+  fundamentals: "T+1"
+  events: "T+1"
+
+paths:
+  prices: "datahub/silver/alpha/prices"
+  chip: "datahub/silver/alpha/chip"
+  dividend: "datahub/silver/alpha/dividend"
+  per: "datahub/silver/alpha/per"
+
+validation:
+  dsr_min_after_costs: 0.0
+
+alpha_quality:
+  rank_ic_weekly_min: 0.03
+
+orthogonalization:
+  corr_abs_max: 0.7
+
+costs:
+  fees_bps: 10     # 依實際費率改 10–15
+  tax_bps: 30
+  slip_bps: 10     # 回放校準可調 5–15
+
+constraints:
+  max_weight_per_symbol: 0.05
+  max_daily_participation: 0.05
+
+execution:
+  protect_limit_orders: true
+  auction: true
+  pov_enabled: true
+
+universe:
+  allowed_suffixes: [".TW", ".TWO"]
+  drop_empty: true
+
+benchmark:
+  symbol: "0050.TW"
+
+gates:
+  wf_pass_min: 0.80
+  participation_max: 0.05
+  leakage_corr_sameweek_max: 0.2
+
+live_controls:
+  killswitch_drawdown_1: -0.10
+  killswitch_drawdown_2: -0.15
+
+validation:
+  alpha_quality:
+    dsr_min_after_costs: 0.0
+
+live_controls:
+  killswitch:
+    drawdown_soft_pct: -10.0
+    drawdown_hard_pct: -15.0

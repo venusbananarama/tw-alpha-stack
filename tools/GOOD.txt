@@ -183,3 +183,19 @@ Get-Content ./reports/snapshot.txt
 ---
 
 如果你願意，我也可以把上面這張「統合紀錄」再**壓縮成更精簡的 1‑pager**（或者拆成「運維面/研發面」兩張）方便你分欄貼在畫布；告訴我你畫布的欄位結構（例如：現況、問題、指令、里程碑），我就依欄位輸出對應版本。
+
+
+
+
+OneClick-Repair.ps1（可直接貼上存檔
+
+
+# 查 429
+$has429 = Select-String .\reports\*.log -Pattern '429|Too Many|Rate limit' -List -ErrorAction SilentlyContinue | Select -First 1
+if($has429){ '偵測到 429：請先降檔或維持現狀' } else { '無 429：可升檔' }
+
+# 升檔示例：10 → 20 → 30 → 50 → 80 → 100
+$env:FINMIND_THROTTLE_RPM='10'
+pwsh -NoProfile -File .\tools\Run-Max-Recent.ps1 `
+  -Start 2018-01-15 -WindowDays 14 -Workers 4 -ThrottleRPM 20 `
+  -Tag S1_all -Group ALL

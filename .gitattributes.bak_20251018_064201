@@ -1,0 +1,9 @@
+# Normalize text; keep Windows CRLF for PowerShell scripts
+* text=auto
+*.ps1 eol=crlf
+*.psm1 eol=crlf
+*.py eol=lf
+# Binary formats
+*.parquet binary
+*.arrow  binary
+*.xlsx   binary

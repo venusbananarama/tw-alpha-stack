@@ -1,6 +1,3 @@
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-# gptcodex: alpha → tools/Run-WFGate.ps1
 [CmdletBinding()]
 param(
   [string]$File,
@@ -8,6 +5,10 @@ param(
   [switch]$Summary,
   [string]$Export
 )
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+# gptcodex: alpha → tools/Run-WFGate.ps1
 $ErrorActionPreference = "Stop"
 $ROOT = Resolve-Path (Join-Path $PSScriptRoot "..") | Select-Object -Expand Path
 Set-Location $ROOT
@@ -32,4 +33,5 @@ if ($Export) { $argsList += @("--export",$Export) }
 
 & $py @argsList
 exit $LASTEXITCODE
+
 

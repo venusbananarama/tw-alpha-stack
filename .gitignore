@@ -49,3 +49,13 @@ tw-alpha-stack.zip
 tw-alpha-stack.zip
 
 tw-alpha-stack.zip
+# --- Repo hygiene ---
+reports/tree_snapshot.txt
+*.parquet
+*.arrow
+*.feather
+*.csv.gz
+*.html
+*.xlsx
+.env
+secrets.env

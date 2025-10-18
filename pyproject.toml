@@ -1,15 +1,9 @@
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+[tool.black]
+line-length = 100
+target-version = ["py311"]
 
-[project]
-name = "tw-alpha-stack"
-version = "0.1.0"
-description = "Taiwan stocks alpha pipeline: data -> features -> signals -> backtest -> report"
-requires-python = ">=3.10,<3.12"
-authors = [{name="you"}]
-
-[tool.pytest.ini_options]
-minversion = "7.0"
-addopts = "-q"
-testpaths = ["tests"]
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+select = ["E","F","B","UP"]
+ignore = []

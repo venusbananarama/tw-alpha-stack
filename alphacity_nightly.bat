@@ -11,10 +11,11 @@ rem 1) Preflight（schema/as-of/freshness）
 "%PY%" scripts/preflight_check.py --rules rules.yaml --export reports --root . 1>>"%LOG%" 2>&1
 
 rem 2) 建投資池（確保 universe 更新）
-"%PY%" scripts/build_universe.py --config configs/universe.yaml --rules rules.yaml --out configs/investable_universe.txt --drop-empty 1>>"%LOG%" 2>&1
+"%PY%" scripts/build_universe.py --config configs/universe.yaml --rules rules.yaml --out configs/investable_universe.txt 1>>"%LOG%" 2>&1
 
 rem 3) Walk-forward 與 Gate
 "%PY%" scripts/wf_runner.py --dir runs/wf_configs --export reports 1>>"%LOG%" 2>&1
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/Run-WFGate.ps1 1>>"%LOG%" 2>&1
 
 endlocal
+
