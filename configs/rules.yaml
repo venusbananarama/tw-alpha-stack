@@ -106,3 +106,12 @@ reporting:
   root_hint: "."
   export_dir: reports
 # === End mini-run additions ===
+validation:
+  alpha_quality: {rank_ic_weekly_min: 0.03, psr_min: 0.9, t_stat_min: 2.0, dsr_min_after_costs: 0.0}
+  walk_forward:  {wf_pass_min: 0.80, windows: [6, 12, 24]}
+  turnover:      {annual_max: 500.0}
+  risk:          {max_drawdown_pct: 20.0, vol_target_pct: [10.0, 12.0], weight_single_name_max_pct: 5.0, adv_participation_max_pct: 5.0}
+  costs_exec:    {replay_mae_bps_max: 2.0}
+live_controls:
+  killswitch:    {drawdown_soft_pct: -10.0, drawdown_hard_pct: -15.0}
+ssot:            {schema_ver: 2025_09_29, week_anchor: W-FRI, tz: Asia/Taipei}

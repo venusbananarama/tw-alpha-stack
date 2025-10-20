@@ -1,3 +1,4 @@
+from __future__ import annotations
 def ensure_sharpe_after_costs(df):
     if 'sharpe_after_costs' not in df.columns:
         if 'sharpe' in df.columns:
@@ -7,7 +8,6 @@ def ensure_sharpe_after_costs(df):
     return df
 # gptcodex: alpha → scripts/wf_gate_helper.py
 """將此模組引入既有 wf_runner，在最終彙總處套用 Gate。"""
-from __future__ import annotations
 from typing import Dict, Any
 import json
 
@@ -37,4 +37,5 @@ def apply_gate(df, rules: Dict[str, Any]) -> Dict[str, Any]:
 
 def print_gate_result(res: Dict[str, Any]) -> None:
     print(json.dumps({"gate": res}, ensure_ascii=False))
+
 
