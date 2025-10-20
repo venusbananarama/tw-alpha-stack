@@ -21,3 +21,7 @@ check_env.ps1               C:\AI\tw-alpha-stack\tools\devops\check_env.ps1
 Check-CanonicalLayout.ps1   C:\AI\tw-alpha-stack\tools\repair\Check-CanonicalLayout.ps1
 
 
+### Entrypoint & Orchestrator Checks
+- Run-Max-Recent.ps1 guard: OK
+- Run-WFGate.ps1 guard: OK
+- Orchestrator self_call: False
