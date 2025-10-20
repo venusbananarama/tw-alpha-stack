@@ -115,7 +115,6 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File "$canon" @Args
 function QuickSyntax($files){
   foreach($f in ($files | Select-Object -Unique)){
     $t=$null;$e=$null
-if(-not (Test-Path $f)){ Write-Warning "QuickSyntax skip (missing): $f"; continue }
     [System.Management.Automation.Language.Parser]::ParseFile($f,[ref]$t,[ref]$e) | Out-Null
     if($e){ throw "ParserError: $f`n$($e|Out-String)" }
   }
