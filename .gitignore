@@ -63,3 +63,9 @@ secrets.env
 RELEASE_NOTES_*.txt
 
 AlphaCity_handover_*.zip.sha256.txt
+tools_backup_*
+reports/
+metrics/
+datahub/
+.venv/
+state/*.json
