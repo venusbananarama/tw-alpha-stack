@@ -1,11 +1,3 @@
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-param([string]$RepoRoot = $(Split-Path -Parent $PSScriptRoot))
-Set-Location -Path $RepoRoot
-$env:ALPHACITY_ALLOW = "1"
-$PY = Join-Path $RepoRoot ".venv\Scripts\python.exe"
-Write-Host "PYEXE=" $PY
-Write-Host "CWD=" (Get-Location).Path
-Write-Host "ALLOW=" $env:ALPHACITY_ALLOW
-return $PY
-
+param([Parameter(ValueFromRemainingArguments=$true)][object[]]$Rest)
+Write-Host "[shim] Set-AlphaCity-Env.ps1 → devops\Set-AlphaCity-Env.ps1" -ForegroundColor Yellow
+pwsh -NoProfile -ExecutionPolicy Bypass -File "C:\AI\tw-alpha-stack\tools\devops\Set-AlphaCity-Env.ps1" @Rest

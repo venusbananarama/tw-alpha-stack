@@ -1,0 +1,11 @@
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+param([string]$RepoRoot = $(Split-Path -Parent $PSScriptRoot))
+Set-Location -Path $RepoRoot
+$env:ALPHACITY_ALLOW = "1"
+$PY = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+Write-Host "PYEXE=" $PY
+Write-Host "CWD=" (Get-Location).Path
+Write-Host "ALLOW=" $env:ALPHACITY_ALLOW
+return $PY
+
