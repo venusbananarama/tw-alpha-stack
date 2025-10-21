@@ -26,7 +26,7 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def run_file(path: pathlib.Path, rules) -> dict:
-    df = pd.read_csv(path)
+    df = pd.read_csv(path, comment="#")
     df = normalize_df(df)
     res = apply_gate(df, rules)
     return {"file": str(path), "gate": res}
@@ -84,3 +84,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
