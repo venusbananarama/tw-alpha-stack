@@ -5,7 +5,7 @@ import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-from wf_gate_helper import apply_gate, print_gate_result
+from wf_gate_helper import apply_gate, print_gate_result, ensure_sharpe_after_costs
 
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     cols = {c.lower(): c for c in df.columns}
@@ -26,7 +26,7 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def run_file(path: pathlib.Path, rules) -> dict:
-    df = pd.read_csv(path)
+    df = pd.read_csv(path); df = ensure_sharpe_after_costs(df)
     df = normalize_df(df)
     res = apply_gate(df, rules)
     return {"file": str(path), "gate": res}
@@ -46,7 +46,7 @@ def main():
         d = pathlib.Path(args.dir)
         if not d.is_absolute():
             d = ROOT / args.dir
-        for f in sorted(d.glob("*.csv")):
+        for f in sorted(d.glob("wf_*.csv")):
             results.append(run_file(f, rules))
     elif args.file:
         f = pathlib.Path(args.file)
@@ -55,7 +55,7 @@ def main():
         results.append(run_file(f, rules))
     else:
         reports = ROOT / "reports"
-        cands = sorted(reports.glob("*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+        cands = sorted(reports.glob("wf_*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
         if not cands:
             print("[GATE_SKIP] no results csv found")
             sys.exit(0)
@@ -84,3 +84,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
