@@ -6,13 +6,14 @@ param(
 )
 if ($env:ALPHACITY_ALLOW -ne "1") { Write-Error "ALPHACITY_ALLOW=1 not set. Aborting." -ErrorAction Stop }
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
-if(-not (Test-Path $Export)){ New-Item -ItemType Directory -Force -Path $Export|Out-Null }
+
+if(-not (Test-Path $Export)){ New-Item -ItemType Directory -Force -Path $Export | Out-Null }
 $outFile = Join-Path $Export 'gate_summary.json'
 
-# 1) 執行 runner（注意：runner 目前只掃 $Dir 裡的 *.csv）
+# 1) 執行原生 runner（runner 只會撿 $Dir 裡的 CSV）
 & $Python $Runner --dir $Dir --export $outFile
 
-# 2) 讀 Gate 門檻（預設 0.80；若 rules.yaml 有 wf_pass_min 就覆蓋）
+# 2) 讀 wf_pass_min（預設 0.80）
 $passMin = 0.80
 $rulesPath = ".\configs\rules.yaml"
 if (Test-Path $rulesPath) {
@@ -20,51 +21,72 @@ if (Test-Path $rulesPath) {
   if ($m) { $passMin = [double]$m.Matches[0].Groups[1].Value }
 }
 
-# 3) 正規化（list 或 null → object），並把 gate.ok/gate.status 納入通過判斷
+# 安全取屬性（StrictMode-safe）
+function Get-Prop([object]$o, [string]$name){
+  if($null -eq $o){ return $null }
+  $p = $o.PSObject.Properties[$name]
+  if($null -eq $p){ return $null }
+  return $p.Value
+}
+
+# 3) 正規化（list 或 null -> object）
 try {
-  $rawText = Get-Content $outFile -Raw
-  $raw = $rawText | ConvertFrom-Json -NoEnumerate
+  $raw = (Get-Content $outFile -Raw) | ConvertFrom-Json -NoEnumerate
   $isDict = $raw -is [System.Collections.IDictionary]
   $isList = ($raw -is [System.Collections.IEnumerable]) -and -not ($raw -is [string]) -and -not $isDict
+
   if ($null -eq $raw -or $isList) {
     $runs = if ($null -eq $raw) { @() } else { @($raw) }
-    $passes = 0
+    $passCount = 0
+
     foreach($it in $runs){
       if($null -eq $it){ continue }
       $ok = $false
 
-      # 3a) 優先採用 gate.ok / gate.status
-      if($it.PSObject.Properties['gate']){
-        $gate = $it.gate
-        if($gate -and $gate.PSObject.Properties['ok'] -and [bool]$gate.ok){ $ok = $true }
-        elseif($gate -and $gate.PSObject.Properties['status'] -and ($gate.status -match 'PASS')){ $ok = $true }
+      # gate.ok / gate.status
+      $g = Get-Prop $it 'gate'
+      if($g){
+        $gOk     = Get-Prop $g 'ok'
+        $gStatus = Get-Prop $g 'status'
+        if($gOk -ne $null -and [bool]$gOk){ $ok = $true }
+        elseif($gStatus -and ($gStatus -match 'PASS')){ $ok = $true }
       }
 
-      # 3b) 後備判斷（兼容早期欄位）
+      # 兼容舊欄位
       if(-not $ok){
-        $ov = $it.PSObject.Properties['overall']?.Value
-        if($ov -and ($ov -match 'PASS')) { $ok = $true }
-      }
-      if(-not $ok){
-        $p = $it.PSObject.Properties['pass']?.Value
-        if($null -ne $p -and [bool]$p){ $ok = $true }
-      }
-      if(-not $ok -and $it.PSObject.Properties['wf']){
-        $wf=$it.wf
-        $wfp = $wf.PSObject.Properties['pass']?.Value
-        $wfs = $wf.PSObject.Properties['status']?.Value
-        if($null -ne $wfp -and [bool]$wfp){ $ok=$true }
-        elseif($wfs -and ($wfs -match 'PASS')){ $ok=$true }
+        $ov = Get-Prop $it 'overall'
+        if($ov -and ($ov -match 'PASS')){ $ok = $true }
       }
       if(-not $ok){
-        $wf_pass = $it.PSObject.Properties['wf_pass']?.Value
-        if($null -ne $wf_pass -and [int]$wf_pass -eq 1){ $ok=$true }
+        $p = Get-Prop $it 'pass'
+        if($p -ne $null -and [bool]$p){ $ok = $true }
       }
-      if($ok){ $passes++ }
+      if(-not $ok){
+        $wf = Get-Prop $it 'wf'
+        if($wf){
+          $wfp = Get-Prop $wf 'pass'
+          $wfs = Get-Prop $wf 'status'
+          if($wfp -ne $null -and [bool]$wfp){ $ok = $true }
+          elseif($wfs -and ($wfs -match 'PASS')){ $ok = $true }
+        }
+      }
+      if(-not $ok){
+        $wf_pass = Get-Prop $it 'wf_pass'
+        if($wf_pass -ne $null -and [int]$wf_pass -eq 1){ $ok = $true }
+      }
+
+      if($ok){ $passCount++ }
     }
+
     $count = $runs.Count
-    $rate  = if($count){ [math]::Round($passes/$count,4) } else { 0.0 }
-    $overall = if($count -eq 0){ 'N/A' } else { ( if($rate -ge $passMin){ 'PASS' } else { 'FAIL' } ) }
+    $rate  = if($count){ [math]::Round($passCount / $count, 4) } else { 0.0 }
+
+    $overall = 'N/A'
+    if($count -gt 0){
+      $overall = 'FAIL'
+      if($rate -ge $passMin){ $overall = 'PASS' }
+    }
+
     $obj = [pscustomobject]@{
       overall    = $overall
       wf         = [pscustomobject]@{ pass_rate = $rate }
