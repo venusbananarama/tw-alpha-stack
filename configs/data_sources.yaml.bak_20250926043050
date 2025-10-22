@@ -1,8 +1,0 @@
-datahub_root: ${AC_DATAHUB_ROOT}
-warrant_root: ${AC_WARRANT_ROOT}
-backtests_root: ${AC_BACKTESTS_ROOT}
-reports_root: ${AC_REPORTS_ROOT}
-logs_root: ${AC_LOGS_ROOT}
-metrics_root: ${AC_METRICS_ROOT}
-duckdb_path: ${AC_DUCKDB_PATH}
-duckdb_path_backup: ${AC_DUCKDB_BACKUP}

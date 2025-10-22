@@ -1,3 +1,0 @@
-# .gate_waivers.txt
-# 在此列出暫時不檢查 CLI 建議的舊檔（每行一個相對路徑）
-# 例：scripts/legacy/old_entrypoint.ps1

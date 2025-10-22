@@ -73,3 +73,6 @@ state/*.json
 AlphaCity_code_*.zip
 AlphaCity_handover_*.zip
 *.zip.sha256.txt
+**/*.bak_*
+tools/_archive/
+/_archive/
