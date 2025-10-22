@@ -69,3 +69,7 @@ metrics/
 datahub/
 .venv/
 state/*.json
+# release artifacts (local)
+AlphaCity_code_*.zip
+AlphaCity_handover_*.zip
+*.zip.sha256.txt
