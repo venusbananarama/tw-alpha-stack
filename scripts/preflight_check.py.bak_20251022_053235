@@ -1,17 +1,3 @@
-from datetime import datetime, timezone, timedelta
-def _ac_fix_expect_date(expect_date, cal_path=r".\cal\trading_days.csv"):
-    try:
-        import csv
-        today_tpe = (datetime.now(timezone.utc) + timedelta(hours=8)).date()
-        with open(cal_path, newline="", encoding="utf-8") as f:
-            days = sorted(datetime.strptime(r["date"], "%Y-%m-%d").date() for r in csv.DictReader(f))
-        last_le_today = max((d for d in days if d <= today_tpe), default=expect_date)
-        # 若原本 expect_date 超過今天或超過最近交易日，則回退
-        if expect_date > last_le_today:
-            return last_le_today
-        return expect_date
-    except Exception:
-        return expect_date
 # -*- coding: utf-8 -*-
 # Preflight (Strict Fix, backslash-safe)
 #  - 輸出 freshness 固定四鍵：prices/chip/dividend/per，格式 {max_date: 'yyyy-MM-dd' or None}
@@ -132,4 +118,3 @@ if __name__ == "__main__":
     except Exception:
         pass
     main()
-

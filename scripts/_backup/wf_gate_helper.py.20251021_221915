@@ -39,6 +39,3 @@ def print_gate_result(res: Dict[str, Any]) -> None:
     print(json.dumps({"gate": res}, ensure_ascii=False))
 
 
-
-
-

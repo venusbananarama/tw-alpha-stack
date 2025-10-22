@@ -76,17 +76,7 @@ def main():
             else:
                 export_path = ROOT / "reports" / export_path
         export_path.parent.mkdir(parents=True, exist_ok=True)
-        # --- fatai patch: ensure export is a FILE, not a directory ---
-try:
-    from pathlib import Path
-    _ep = Path(args.export)
-    if _ep.exists() and _ep.is_dir():
-        _ep = _ep / 'gate_summary.json'
-    export_path = _ep
-except Exception:
-    export_path = Path(args.export)
-# --- end patch ---
-export_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+        export_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"[EXPORTED] {export_path}")
 
     ok_all = all(r["gate"]["ok"] for r in results) if results else True
@@ -94,5 +84,4 @@ export_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encodi
 
 if __name__ == "__main__":
     main()
-
 
