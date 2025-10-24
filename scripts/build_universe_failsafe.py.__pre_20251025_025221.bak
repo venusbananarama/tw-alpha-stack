@@ -1,0 +1,40 @@
+from pathlib import Path
+import sys
+
+root = Path(__file__).resolve().parents[1]
+all_txt = root/"configs"/"groups"/"ALL.txt"
+out_txt = root/"configs"/"investable_universe.txt"
+
+prices = root/"datahub"/"silver"/"alpha"/"prices"
+parts  = [p for p in prices.glob("yyyymm=*") if p.is_dir()]
+if not parts:
+    print("[FAIL] prices 下沒有任何 yyyymm= 分區，請先回填價格資料。", file=sys.stderr)
+    sys.exit(2)
+latest = max(parts, key=lambda p: p.name)
+
+# 讀 ALL.txt，只取數字代碼
+syms = []
+if all_txt.exists():
+    syms = [s.strip() for s in all_txt.read_text(encoding="utf-8").splitlines()
+            if s.strip().isdigit()]
+else:
+    print(f"[WARN] 找不到 {all_txt}，改用分區裡的 symbol= 目錄掃描", file=sys.stderr)
+    # 掃描 latest 分區下的 symbol 目錄
+    for dp in latest.iterdir():
+        name = dp.name
+        if name.startswith("symbol="):
+            sym = name.split("=",1)[1].strip()
+            if sym.isdigit():
+                syms.append(sym)
+
+# 只保留真的有資料的代號（支援 symbol=2330 或 2330 兩種目錄命名）
+valid = []
+for s in syms:
+    if (latest/f"symbol={s}").exists() or (latest/s).exists():
+        valid.append(s)
+
+if not valid:
+    print("[FAIL] 仍然沒有任何可用代號（請先做價格回填）。", file=sys.stderr); sys.exit(3)
+
+out_txt.write_text("\n".join(valid) + "\n", encoding="utf-8")
+print(f"[OK] universe={len(valid)} -> {out_txt}")

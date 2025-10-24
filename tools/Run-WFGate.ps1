@@ -1,7 +1,7 @@
-param([Parameter(ValueFromRemainingArguments=$true)][object[]]$Rest)
-$ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
-$pwsh = Join-Path $PSHOME 'pwsh.exe'
-if(-not (Test-Path $pwsh)){ $pwsh = (Get-Command pwsh -ErrorAction SilentlyContinue)?.Source }
-if(-not $pwsh){ $pwsh = (Get-Command powershell -ErrorAction SilentlyContinue)?.Source }
-if(-not $pwsh){ Write-Error "No pwsh/powershell found in PATH or PSHOME"; exit 1 }
-& $pwsh -NoProfile -ExecutionPolicy Bypass -File "C:\AI\tw-alpha-stack\tools\gate\Run-WFGate.ps1" @Rest
+if ($env:ALPHACITY_ALLOW -ne '1') { Write-Error 'ALPHACITY_ALLOW=1 not set.' -ErrorAction Stop }
+$target = Join-Path $PSScriptRoot 'gate\Run-WFGate.ps1'
+if (-not (Test-Path $target)) { throw 'Missing tools\gate\Run-WFGate.ps1' }
+# 不用 param(...)，避免被 dot-source 時觸發 parser；直接把不明參數透傳
+$args2 = @('-NoProfile','-ExecutionPolicy','Bypass','-File', $target) + $args
+& pwsh @args2
+exit $LASTEXITCODE

@@ -1,0 +1,13 @@
+if ($env:ALPHACITY_ALLOW -ne '1') { Write-Error 'ALPHACITY_ALLOW=1 not set.' -ErrorAction Stop }
+$root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$cands = @(
+  (Join-Path $root 'tools\fullmarket\Run-FullMarket-DateID-MaxRange.ps1'),
+  (Join-Path $root 'tools\Run-FullMarket-DateID-MaxRange.ps1'),
+  (Join-Path $root 'tools\fullmarket\Run-FullMarket-DateID-MaxRate.ps1'),
+  (Join-Path $root 'tools\Run-FullMarket-DateID-MaxRate.ps1'),
+  (Join-Path $root 'tools\fullmarket\Run-FullMarket-DateIDMaxRate.ps1'),
+  (Join-Path $root 'tools\Run-FullMarket-DateIDMaxRate.ps1')
+)
+$target = $cands | Where-Object { Test-Path $_ } | Select-Object -First 1
+if(-not $target){ throw "Bridge target missing: (checked) `n  - $($cands -join "`n  - ")" }
+& pwsh -NoProfile -ExecutionPolicy Bypass -File $target @args

@@ -1,0 +1,5 @@
+if ($env:ALPHACITY_ALLOW -ne '1') { Write-Error 'ALPHACITY_ALLOW=1 not set.' -ErrorAction Stop }
+$target = Join-Path $PSScriptRoot 'gate\Run-WFGate.ps1'
+if (-not (Test-Path $target)) { throw 'Missing tools\gate\Run-WFGate.ps1' }
+# dot-source 也安全：不使用 param(...)，僅透傳 @args
+& pwsh -NoProfile -ExecutionPolicy Bypass -File $target @args

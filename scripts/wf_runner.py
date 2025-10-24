@@ -1,98 +1,33 @@
-from __future__ import annotations
-import sys, pathlib, argparse, json
-import pandas as pd
-import yaml
+# -*- coding: utf-8 -*-
+from pathlib import Path
+import sys, os, subprocess
+ROOT = Path(__file__).resolve().parents[1]
+CORE = ROOT / "scripts" / "wf_runner_core.py"
+SAFE = ROOT / "scripts" / "wf_runner_safe.py"
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
-from wf_gate_helper import apply_gate, print_gate_result
-
-def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
-    cols = {c.lower(): c for c in df.columns}
-    ren = {}
-    for k, v in cols.items():
-        if ("sharpe" in k) and ("cost" in k):
-            ren[v] = "sharpe_after_costs"
-        if k in ("max_dd", "maxdrawdown") or "drawdown_max" in k:
-            ren[v] = "max_dd"
-        if "dsr" in k:
-            ren[v] = "dsr_after_costs"
-        if "wf_pass" in k or ("walk" in k and "pass" in k):
-            ren[v] = "wf_pass"
-    df = df.rename(columns=ren)
-    if "wf_pass" not in df.columns and "wf_pass_ratio" in df.columns:
-        r = float(df["wf_pass_ratio"].iloc[-1])
-        df["wf_pass"] = [r] * len(df)
-    return df
-
-def run_file(path: pathlib.Path, rules) -> dict:
-    df = pd.read_csv(path, comment="#")
-    df = normalize_df(df)
-    res = apply_gate(df, rules)
-    return {"file": str(path), "gate": res}
+def _run_safe():
+    if not SAFE.exists():
+        sys.stderr.write("[bridge] wf_runner_safe.py not found.\n")
+        sys.exit(2)
+    py = os.environ.get("PY") or str((ROOT/".venv"/"Scripts"/"python.exe"))
+    if not Path(py).exists():
+        py = sys.executable
+    cmd = [py, str(SAFE), *sys.argv[1:]]
+    raise SystemExit(subprocess.call(cmd))
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--file", type=str, help="指定單一結果 CSV")
-    parser.add_argument("--dir", type=str, help="指定目錄，批次檢查所有 CSV")
-    parser.add_argument("--summary", action="store_true", help="額外輸出總結")
-    parser.add_argument("--export", type=str, help="將結果輸出為 JSON 檔")
-    args = parser.parse_args()
-
-    rules = yaml.safe_load(open(ROOT / "configs" / "rules.yaml", encoding="utf-8"))
-
-    results = []
-    if args.dir:
-        d = pathlib.Path(args.dir)
-        if not d.is_absolute():
-            d = ROOT / args.dir
-        for f in sorted(d.glob("*.csv")):
-            results.append(run_file(f, rules))
-    elif args.file:
-        f = pathlib.Path(args.file)
-        if not f.is_absolute():
-            f = ROOT / "reports" / args.file
-        results.append(run_file(f, rules))
+    if CORE.exists():
+        try:
+            src = CORE.read_text(encoding="utf-8")
+            code = compile(src, str(CORE), "exec")
+            g = {"__name__":"__main__", "__file__":str(CORE)}
+            exec(code, g, None)
+            return
+        except Exception as e:
+            sys.stderr.write(f"[bridge] falling back to safe runner: {type(e).__name__}: {e}\n")
+            _run_safe()
     else:
-        reports = ROOT / "reports"
-        cands = sorted(reports.glob("*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if not cands:
-            print("[GATE_SKIP] no results csv found")
-            sys.exit(0)
-        results.append(run_file(cands[0], rules))
-
-    print(json.dumps(results, ensure_ascii=False, indent=2))
-
-    if args.summary and results:
-        ok_count = sum(1 for r in results if r["gate"]["ok"])
-        fail_count = len(results) - ok_count
-        print(f"\n[SUMMARY] total={len(results)} pass={ok_count} fail={fail_count}")
-
-    if args.export:
-        export_path = pathlib.Path(args.export)
-        if not export_path.is_absolute():
-            if export_path.parts and export_path.parts[0].lower() == "reports":
-                export_path = ROOT / export_path
-            else:
-                export_path = ROOT / "reports" / export_path
-        export_path.parent.mkdir(parents=True, exist_ok=True)
-        # --- fatai patch: ensure export is a FILE, not a directory ---
-try:
-    from pathlib import Path
-    _ep = Path(args.export)
-    if _ep.exists() and _ep.is_dir():
-        _ep = _ep / 'gate_summary.json'
-    export_path = _ep
-except Exception:
-    export_path = Path(args.export)
-# --- end patch ---
-export_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"[EXPORTED] {export_path}")
-
-    ok_all = all(r["gate"]["ok"] for r in results) if results else True
-    sys.exit(0 if ok_all else 2)
+        _run_safe()
 
 if __name__ == "__main__":
     main()
-
-
