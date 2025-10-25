@@ -76,3 +76,7 @@ AlphaCity_handover_*.zip
 **/*.bak_*
 tools/_archive/
 /_archive/
+# release artifacts (local)
+AlphaCity_code_*.zip
+AlphaCity_handover_*.zip
+*.zip.sha256.txt
