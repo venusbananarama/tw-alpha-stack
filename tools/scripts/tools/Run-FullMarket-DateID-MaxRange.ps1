@@ -1,3 +1,5 @@
+﻿#requires -Version 7
+
 if ($env:ALPHACITY_ALLOW -ne '1') { Write-Error 'ALPHACITY_ALLOW=1 not set.' -ErrorAction Stop }
 $anc = @(
   (Split-Path $PSScriptRoot -Parent),
@@ -20,3 +22,4 @@ if(-not $target){
   throw ("Bridge target missing, checked:`n{0}" -f $list)
 }
 & pwsh -NoProfile -ExecutionPolicy Bypass -File $target @args
+

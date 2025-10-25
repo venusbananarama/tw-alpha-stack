@@ -1,10 +1,10 @@
 LLM_Brief (2025-10)
 
 Repo: venusbananarama/tw-alpha-stack
-Tag: handover-20251019-0645 @ 7937843b
+Tag: v4x-tools-dedupe-20251023 @ 9f42d5f2
 
 現況
-- Universe 行數: 2514
+- Universe 行數: 2456
 - Freshness: prices= chip= dividend= per=
 - WF/Gate: pass_rate= overall=
 

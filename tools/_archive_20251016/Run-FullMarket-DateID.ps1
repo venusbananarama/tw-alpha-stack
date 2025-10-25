@@ -1,3 +1,5 @@
+﻿#requires -Version 7
+
 param(
   [string]$UniversePath = ".\configs\derived\universe_ids_only.txt",
   [string]$Start = "2004-01-01",
@@ -28,3 +30,4 @@ for($j=0; $j -lt $all.Count; $j+=$BatchSize){
   }
 }
 "✅ Full-market full-history done ($Start → $End) :: $($all.Count) ids"
+

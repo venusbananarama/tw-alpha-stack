@@ -1,3 +1,5 @@
+﻿#requires -Version 7
+
 param(
   [string]$UniversePath = ".\configs\derived\universe_ids_only.txt",
   [string]$Start        = "2004-01-01",
@@ -75,3 +77,4 @@ for($d=[datetime]$Start; $d -lt [datetime]$End; $d=$d.AddDays($WindowDays)){
   }
 }
 "✅ MaxRate (ThreadJob v0.2) done."
+

@@ -1,9 +1,20 @@
 ﻿# -*- coding: utf-8 -*-
-# FinMind Backfill (API, Strict + Day-Index Gating + end< filter)
+# FinMind Backfill (API, Strict Fix + Day-Index Gating)
 import os, sys, json, time, math, argparse, glob, datetime
 from urllib import request, parse
 import pandas as pd
 
+
+# --- SSOT helper: enforce --end as exclusive
+def _filter_end_exclusive(df, end):
+    try:
+        import pandas as _pd
+        if df is None or df.empty:
+            return df
+        _dt = _pd.to_datetime(df.get("date"), errors="coerce")
+        return df.loc[_dt < _pd.Timestamp(end)]
+    except Exception:
+        return df
 BASE  = os.environ.get("FINMIND_BASE_URL", "https://api.finmindtrade.com/api/v4/data")
 TOKEN = (os.environ.get("FINMIND_TOKEN") or "").strip()
 if not TOKEN:
@@ -46,9 +57,11 @@ def http_get(dataset: str, data_id: str, start: str, end: str) -> pd.DataFrame:
         return df
 
 def build_day_index(root: str, kind: str, day: str) -> tuple[set,int]:
+    """一次掃描 day 所在月（必要時+前月），回傳該日已存在的 symbol 集合"""
     base = os.path.join(root, "silver", "alpha", kind)
     d    = parse_date(day)
     ym   = f"{d.year:04d}{d.month:02d}"
+    # 若 day=月初才需要前月；否則僅掃當月（加速）
     pats = [os.path.join(base, f"yyyymm={ym}", "**", "*.parquet")]
     if d.day == 1:
         prev = (d.replace(day=1) - datetime.timedelta(days=1))
@@ -121,7 +134,7 @@ def main():
         syms = sorted(set(syms))
     if not syms: syms = load_pool(".")
 
-    print("=== FinMind Backfill (API, Strict + DayIndex) ===")
+    print("=== FinMind Backfill (API, Strict Fix + DayIndex) ===")
     print(f"Start={args.start} End={args.end} Universe={'TSE' if syms else 'N/A'}")
     print(f"Datasets={','.join([dataset_to_kind(d) for d in ds_list])}")
     mode = ("單股 指定 %d 檔" % len(syms)) if syms else "全市場（本地投資池）"
@@ -146,15 +159,7 @@ def main():
 
         for s in todo:
             try:
-                df = http_get(ds, s, args.start, args.end)
-                # SSOT：--end 為「不含」，過濾掉 >= end 的資料
-                if df is not None and not df.empty:
-                    try:
-                        di = pd.to_datetime(df["date"], errors="coerce")
-                        df = df[di < pd.to_datetime(args.end)]
-                    except Exception:
-                        pass
-                if df is not None and not df.empty:
+                df = http_get(\g<0>)                if df is not None and not df.empty:
                     w = write_silver(df, args.datahub_root, kind)
                     rows_written += w
                     files_out    += 1 if w>0 else 0
@@ -176,3 +181,4 @@ if __name__ == "__main__":
         if hasattr(sys.stdout,"reconfigure"): sys.stdout.reconfigure(encoding="utf-8")
     except Exception: pass
     main()
+
