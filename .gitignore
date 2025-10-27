@@ -86,3 +86,7 @@ backups/
 *.bak
 *.bak_*
 
+
+# quarantine & duplicates
+tools/_quarantine/
+
