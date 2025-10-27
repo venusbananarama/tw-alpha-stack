@@ -1,9 +1,8 @@
 ﻿#requires -Version 7
 <#
-  Run-DateID-Extras.ps1 (AC6 minimal, array-safe)
-  - Single-day × multi-IDs Date-ID fetch for "extra" datasets.
-  - Writes to: datahub\silver\alpha\extra\<Dataset>\yyyymm=*
-  - --end is exclusive; if not given, we use (Date + 1).
+  Run-DateID-Extras.ps1
+  單日×多股 Date-ID 特攻（預設「必收 8 表」），把資料寫到 datahub\silver\alpha\extra\<Dataset>\yyyymm=*。
+  --end 為不含終點；單日預設以 (Date + 1) 傳給 Python 外掛。 
 #>
 [CmdletBinding(PositionalBinding=$false)]
 param(
@@ -19,17 +18,17 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 
-# Root & Python
+# 專案根與 Python
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 Set-Location $root
 if(-not $env:ALPHACITY_ALLOW){ $env:ALPHACITY_ALLOW='1' }
 Remove-Item Env:PYTHONSTARTUP -ErrorAction SilentlyContinue | Out-Null
 $PY = '.\.venv\Scripts\python.exe'
-if(-not (Test-Path $PY)){ throw ("Missing {0} (create venv & install requirements)" -f $PY) }
-if([string]::IsNullOrWhiteSpace($env:FINMIND_TOKEN)){ throw "FINMIND_TOKEN not set" }
+if(-not (Test-Path $PY)){ throw "找不到 $PY，請先建立 venv 並安裝需求套件。" }
+if([string]::IsNullOrWhiteSpace($env:FINMIND_TOKEN)){ throw "FINMIND_TOKEN 未設定" }
 if(-not $env:FINMIND_KBAR_INTERVAL){ $env:FINMIND_KBAR_INTERVAL='5' }
 
-# ===== Helpers: pool & pattern expansion (ALL / 23XXX / 23*) =====
+# ===== 共用：池表與樣板展開（ALL/23XXX/23*） =====
 function Get-PoolIDs {
   $candidates = @(
     '.\configs\investable_universe.txt',
@@ -39,19 +38,18 @@ function Get-PoolIDs {
   )
   foreach($p in $candidates){
     if(Test-Path $p){
-      [string[]]$ids = @( Get-Content -LiteralPath $p | ForEach-Object {
+      $ids = Get-Content -LiteralPath $p | ForEach-Object {
         if($_ -match '^\s*(\d{4})(?:\.TW)?\b'){ $matches[1] }
-      } | Sort-Object -Unique )
-      if($ids.Length -gt 0){ return $ids }
+      } | Sort-Object -Unique
+      if($ids.Count -gt 0){ return $ids }
     }
   }
-  throw ("no valid pool file; tried: {0}" -f ($candidates -join ', '))
+  throw "找不到有效池表或內容為空；候選：" + ($candidates -join ', ')
 }
-
 function Convert-TokenToLike4([string]$token){
   $t = ($token -replace '\.TW$','').Trim()
   if($t -match '^(ALL|TSE)$'){ return '????' }
-  $like = ''
+  $like=''
   foreach($ch in $t.ToCharArray()){
     if($like.Length -ge 4){ break }
     switch -Regex ($ch){
@@ -64,13 +62,11 @@ function Convert-TokenToLike4([string]$token){
   while($like.Length -lt 4){ $like += '?' }
   return $like
 }
-
 function Expand-IDPatterns([string[]]$IDs){
-  [string[]]$pool = Get-PoolIDs
-  $set = New-Object System.Collections.Generic.HashSet[string]
+  $pool = Get-PoolIDs
+  $set  = New-Object System.Collections.Generic.HashSet[string]
   foreach($tok in @($IDs)){
-    $parts = @(); if($tok -is [string] -and $tok -match ','){ $parts = $tok.Split(',') } else { $parts = @($tok) }
-    foreach($raw in $parts){
+    foreach($raw in ( ($tok -is [string] -and $tok -match ',') ? $tok.Split(',') : @($tok) )){
       $t = ($raw -replace '\.TW$','').Trim()
       if(-not $t){ continue }
       if($t -match '^(ALL|TSE)$'){ foreach($id in $pool){ [void]$set.Add($id) }; continue }
@@ -82,34 +78,31 @@ function Expand-IDPatterns([string[]]$IDs){
   return @($set | Sort-Object)
 }
 
-# Expand IDs → .TW (array-safe)
-[string[]]$expandedIDs = @( Expand-IDPatterns @($IDs) )
-if($expandedIDs.Length -eq 0){ throw "IDs pattern expands to empty set" }
-[string[]]$symbols = $expandedIDs | ForEach-Object { "$_.TW" }
+# IDs 樣板展開 → .TW
+$expandedIDs = Expand-IDPatterns @($IDs)
+if(-not $expandedIDs){ throw "IDs 展開後為空（請檢查樣板或池表）" }
+$symbols = foreach($id in $expandedIDs){ "$id.TW" }
 
-# Window & dataset list (arrays)
+# 窗口（--end 不含 → Date+1），與 datasets 清單
 $ds    = $Date.ToString('yyyy-MM-dd')
 $endEx = if($PSBoundParameters.ContainsKey('End')){ ([datetime]$End).ToString('yyyy-MM-dd') } else { ($Date.AddDays(1)).ToString('yyyy-MM-dd') }
-[string[]]$sets = ($Datasets -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+$sets  = ($Datasets -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
 
-# Throttle for the Python-side fetcher
+# 節流（RPM 傳給 Python 外掛實作 sleep）
 $env:FINMIND_THROTTLE_RPM = [string]$RPM
 
-Write-Host ("[DateID-Extras] date={0} end_exclusive={1} ids={2} rpm={3} datasets={4}" -f $ds,$endEx,($symbols.Length),$RPM,($sets -join ','))
+Write-Host "[DateID-Extras] date=$ds end_exclusive=$endEx ids=$(@($symbols).Count) rpm=$RPM datasets=$($sets -join ',')"
 
-# Main loop (array slicing guarded)
-$N = $symbols.Length
-for($i=0; $i -lt $N; $i+=$Batch){
-  $j = [Math]::Min($i+$Batch-1, $N-1)
-  if($j -lt $i){ break }
-  [string[]]$chunk = @($symbols[$i..$j])
-  $idsArg = ($chunk -join ',')
+for($i=0; $i -lt $symbols.Count; $i+=$Batch){
+  $j=[Math]::Min($i+$Batch-1,$symbols.Count-1)
+  $chunk=$symbols[$i..$j]; $idsArg=($chunk -join ',')
   foreach($d in $sets){
     & $PY .\scripts\fm_dateid_fetch.py `
       --datasets $d --ids $idsArg `
       --date $ds --end $endEx `
       --out-root $DataRoot
   }
-  if($i -lt ($N-1)){ Start-Sleep -Milliseconds 500 }
+  if($i -lt ($symbols.Count-1)){ Start-Sleep -Milliseconds 500 }
 }
 Write-Host "Done (extras)."
+

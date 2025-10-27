@@ -1,7 +1,7 @@
-# --- AC_EXPECT_FIX v2 (holiday-aware & trading-flag-aware) ---
+# --- AC_EXPECT_FIX begin (holiday-aware expect_date) ---
 from pathlib import Path as _P
 from zoneinfo import ZoneInfo as _Z
-import pandas as _pd, os as _os
+import pandas as _pd, os as _os, sys as _sys
 
 _TZ   = _Z('Asia/Taipei')
 _NOW  = _pd.Timestamp.now(_TZ)
@@ -9,50 +9,23 @@ _TOD  = _NOW.normalize()
 _CUT  = int(_os.getenv('ALPHACITY_DATA_READY_HOUR_LOCAL','18'))
 
 _cal = _pd.read_csv(_P('cal')/'trading_days.csv')
-
-# 正規化欄名；若無標頭，也把第一欄視為 date、第二欄視為旗標
-_cal.columns = [str(c).strip().lower() for c in _cal.columns]
-if 'date' not in _cal.columns:
-    _cal.rename(columns={_cal.columns[0]:'date'}, inplace=True)
-_flagcol = None
-for cand in ('is_trading','is_open','open','trading','flag'):
-    if cand in _cal.columns:
-        _flagcol = cand
-        break
-if _flagcol is None and _cal.shape[1] >= 2:
-    _flagcol = _cal.columns[1]
-
-# 只取「旗標=1」的交易日序列
-if _flagcol:
-    _cal_td = _cal[_cal[_flagcol].fillna(0).astype(int) == 1].copy()
-else:
-    _cal_td = _cal.copy()
-
-_cal_td['date'] = _pd.to_datetime(_cal_td['date'], format='%Y-%m-%d', errors='coerce')
-_cal_td = _cal_td.dropna(subset=['date']).sort_values('date').reset_index(drop=True)
+_cal['date'] = _pd.to_datetime(_cal['date'], format='%Y-%m-%d', errors='coerce')
+_cal = _cal.dropna()
 
 # 最近且 <= 今天 的交易日
-_last_le_today = _cal_td.loc[_cal_td['date'] <= _TOD.tz_localize(None), 'date'].max()
+_last_le_today = _cal.loc[_cal['date'] <= _TOD.tz_localize(None), 'date'].max()
 
-# 若今天是交易日但未過 cut-off，退回上一個交易日
-_today_is_trading = (_TOD.tz_localize(None) in set(_cal_td['date']))
+# 若今天是交易日但未過 cut-off，改用「前一個交易日」
+_today_is_trading = _TOD.tz_localize(None) in set(_cal['date'])
 if _today_is_trading and (_NOW.hour < _CUT):
-    _idx = _cal_td['date'].searchsorted(_TOD.tz_localize(None)) - 1
-    _last_trading = _cal_td['date'].iloc[_idx] if _idx >= 0 else _last_le_today
+    _idx = _cal['date'].searchsorted(_TOD.tz_localize(None)) - 1
+    _last_trading = _cal['date'].iloc[_idx] if _idx >= 0 else _last_le_today
 else:
     _last_trading = _last_le_today
 
 expect_date_fixed = str(_last_trading.date()) if _last_trading is not None else None
-
-# 嘗試讓主程式採用（除非主程式之後另有明確覆蓋）
-try:
-    if 'expect_date' not in globals() or not globals().get('expect_date'):
-        expect_date = expect_date_fixed
-except Exception:
-    expect_date = expect_date_fixed
-
-print(f'[Preflight/Guard/v2] expect_date_fixed={expect_date_fixed} tz=Asia/Taipei (cutoff={_CUT})')
-# --- AC_EXPECT_FIX v2 end ---
+print(f'[Preflight/Guard] expect_date_fixed={expect_date_fixed} tz=Asia/Taipei')
+# --- AC_EXPECT_FIX end ---
 from datetime import datetime, timezone, timedelta
 def _ac_fix_expect_date(expect_date, cal_path=r".\cal\trading_days.csv"):
     try:
@@ -187,6 +160,5 @@ if __name__ == "__main__":
     except Exception:
         pass
     main()
-
 
 

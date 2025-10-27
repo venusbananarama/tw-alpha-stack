@@ -1,27 +1,8 @@
-# --- injected guard: run_path self-skip & safe str() ---
-# --- injected guard: args fallback (v2) ---
-import sys as _sys
-try:
-    args  # noqa: F821
-except NameError:
-    try:
-        import argparse as _argparse
-        _ap = _argparse.ArgumentParser(add_help=False)
-        _ap.add_argument('--dir'); _ap.add_argument('--export'); _ap.add_argument('--root')
-        _ap.add_argument('--config'); _ap.add_argument('--pattern')
-        _ap.add_argument('--runs', nargs='*'); _ap.add_argument('--limit', type=int)
-        _ap.add_argument('--workers', type=int); _ap.add_argument('--dryrun', action='store_true')
-        _ap.add_argument('--verbose', action='store_true')
-        args = _ap.parse_known_args(_sys.argv[1:])[0]
-    except Exception:
-        from types import SimpleNamespace as _NS
-        args = _NS(dir='runs/wf_configs', export='reports', root='.', config=None, pattern=None, runs=None, limit=None, workers=None, dryrun=False, verbose=False)
-globals()['args'] = args
-# --- /injected guard: args fallback (v2) ---
-# --- injected guard: results fallback + atexit exporter (v5) ---
+# --- injected guard: results fallback + atexit exporter (v3) ---
 from pathlib import Path as _P
-import atexit as _atexit, json as _json, os as _os, time as _time
+import atexit as _atexit, json as _json
 
+# 後備 results：若未賦值，避免 NameError
 try:
     results  # noqa: F821
 except NameError:
@@ -30,33 +11,54 @@ except NameError:
 def _ac_get_results():
     global results
     if results is None:
+        # 最小可被 Gate 處理的結構；主程式若產出真實 results 會覆蓋它
         results = {"runs": [], "meta": {"mode": "core-fallback", "note": "auto-filled due to missing results"}}
     return results
 
-def _ac_export_path():
-    # write ONLY to _runner_results.json to avoid clobbering gate_summary.json
-    _default = _P.cwd() / "reports" / "_runner_results.json"
-    _env = _os.getenv("AC_RUNNER_RESULTS", None)
+def _ac_get_export_path():
+    # 若主程式有定義 export_path 就用之，否則落到 ./reports/wf_results.json
     try:
-        return _P(_env) if _env else _default
+        return export_path  # noqa: F821
     except Exception:
-        return _default
+        return (_P.cwd() / "reports" / "wf_results.json")
 
 def _ac_export():
     try:
-        _p = _ac_export_path()
+        _p = _ac_get_export_path()
         _p.parent.mkdir(parents=True, exist_ok=True)
-        _payload = _ac_get_results()
-        _meta = _payload.setdefault("meta", {})
-        _meta.setdefault("exported_at", _time.strftime("%Y-%m-%dT%H:%M:%S"))
-        if "mode" not in _meta:
-            _meta["mode"] = "core-fallback"
-        _p.write_text(_json.dumps(_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        _p.write_text(_json.dumps(_ac_get_results(), ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
+        # 不要讓 atexit export 影響主程式退出
         pass
 
+# 確保離開程式時一定會留下結果（即使主流程中途失敗）
 _atexit.register(_ac_export)
 # --- /injected guard ---
+# --- injected guard: args fallback (v1) ---
+import sys as _sys
+try:
+    args  # noqa: F821
+except NameError:
+    try:
+        import argparse as _argparse
+        _ap = _argparse.ArgumentParser(add_help=False)
+        _ap.add_argument('--dir')
+        _ap.add_argument('--export')
+        _ap.add_argument('--root')
+        _ap.add_argument('--config')
+        _ap.add_argument('--pattern')
+        _ap.add_argument('--runs', nargs='*')
+        _ap.add_argument('--limit', type=int)
+        _ap.add_argument('--workers', type=int)
+        _ap.add_argument('--dryrun', action='store_true')
+        _ap.add_argument('--verbose', action='store_true')
+        args = _ap.parse_known_args()[0]
+    except Exception:
+        from types import SimpleNamespace as _NS
+        args = _NS(dir='runs/wf_configs', export='reports', root='.', config=None, pattern=None, runs=None, limit=None, workers=None, dryrun=False, verbose=False)
+globals()['args'] = args
+# --- /injected guard: args fallback (v1) ---
+# --- injected guard: run_path self-skip & safe str() ---
 import runpy as _runpy
 from pathlib import Path as _P
 def _pstr(p):
@@ -110,11 +112,6 @@ if safe.exists():
 else:
     sys.stderr.write(f"[Bridge] SAFE runner missing: {safe}\n")
     sys.exit(3)
-
-
-
-
-
 
 
 

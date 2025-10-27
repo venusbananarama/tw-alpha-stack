@@ -1,158 +1,176 @@
-# -*- coding: utf-8 -*-
-"""
-fm_dateid_fetch.py (hardened for KBar)
-- 通用 Date+ID 抓取（FinMind v4 /api/v4/data）
-- KBar 特別處理：
-  * 自動帶入 time_interval（ENV: FINMIND_KBAR_INTERVAL，預設 1 分）
-  * 區間模式(start_date/end_date)失敗 → 單日(date) fallback 逐日抓取
-- 落地：datahub/silver/alpha/extra/<Dataset>/yyyymm=YYYYMM/*.parquet
-"""
-import os, sys, time, argparse, pathlib
-from datetime import datetime, timedelta
-import requests
+﻿# -*- coding: utf-8 -*-
+import os, sys, json, time, argparse, datetime
+from urllib import request, parse
+from urllib.error import HTTPError, URLError
 import pandas as pd
 
-API_URL = "https://api.finmindtrade.com/api/v4/data"
+BASE  = os.environ.get("FINMIND_BASE_URL", "https://api.finmindtrade.com/api/v4/data")
+TOKEN = (os.environ.get("FINMIND_TOKEN") or "").strip()
+if not TOKEN:
+    print("ERROR: FINMIND_TOKEN not set", file=sys.stderr); sys.exit(2)
 
-def _ensure_dir(p: pathlib.Path):
-    p.mkdir(parents=True, exist_ok=True)
+def norm_ids(ids):
+    out = []
+    for s in ids or []:
+        parts = s.split(",") if isinstance(s, str) and "," in s else [s]
+        for p in parts:
+            q = (p or "").strip()
+            if not q:
+                continue
+            q = q.replace(".TW","").replace(".TWO","").replace(".TPEX","")
+            out.append(q)
+    return sorted(set(out))
 
-def _http(params: dict, timeout: int, max_retries: int) -> dict:
-    last = None
-    for i in range(max_retries + 1):
-        r = requests.get(API_URL, params=params, timeout=timeout)
-        last = (r.status_code, r.text[:200])
-        if r.ok:
-            try:
-                j = r.json()
-            except Exception:
-                j = {}
-            # v4: {"status":200,"data":[...]} or {"success":true,"data":[...]}
-            ok = (j.get("status") == 200) or (j.get("success") is True)
-            if ok:
-                return j
-        time.sleep(min(2 * (i + 1), 10))
-    raise RuntimeError(f"http fail: {last}")
+def alias_to_list(tokens):
+    parts = []
+    for x in tokens or []:
+        if isinstance(x, str) and "," in x:
+            parts.extend([p.strip() for p in x.split(",") if p.strip()])
+        else:
+            parts.append(x)
+    return parts
 
-def _norm_date(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame()
-    x = df.copy()
-    # 常見日期欄位
-    for c in ("date","trading_date","report_date","month"):
-        if c in x.columns:
-            try:
-                x["date"] = pd.to_datetime(x[c], errors="coerce")
-            except Exception:
-                pass
-            break
-    if "date" not in x.columns:
-        if "time" in x.columns:  # KBar 可能是時間戳 -> 取日期
-            try:
-                t = pd.to_datetime(x["time"], errors="coerce")
-                x["date"] = pd.to_datetime(t.dt.date)
-            except Exception:
-                pass
-    if "date" not in x.columns:
-        return pd.DataFrame()
-    return x.dropna(subset=["date"])
+def http_get_one(dataset: str, data_id: str, start: str, end: str) -> pd.DataFrame:
+    """
+    Robust FinMind fetcher for both KBar and non-KBar datasets.
 
-def _write(df: pd.DataFrame, root: pathlib.Path, dataset: str, symbol: str, start: str, end: str) -> int:
-    if df is None or df.empty:
-        return 0
-    x = _norm_date(df)
-    if x.empty:
-        return 0
-    out_root = root / "silver" / "alpha" / "extra" / dataset
-    x["_yyyymm"] = x["date"].dt.strftime("%Y%m")
-    n = 0
-    for yyyymm, part in x.groupby("_yyyymm", dropna=False):
-        dest = out_root / f"yyyymm={yyyymm if isinstance(yyyymm,str) else 'unknown'}"
-        _ensure_dir(dest)
-        fn = f"{dataset}_{symbol}_{yyyymm}.parquet"
-        part.drop(columns=["_yyyymm"], errors="ignore").to_parquet(dest / fn, index=False)
-        n += len(part)
-    return n
+    KBar tries the following shapes in order:
+      A) stock_id + start_time/end_time (+ time_interval if provided)
+      B) stock_id + date (+ time_interval if provided)
+      C) data_id  + start_date
+    Others:
+      dataset + data_id + start_date + end_date (end is exclusive)
+    """
+    ds  = (dataset or "").lower()
+    sid = (str(data_id) or "").strip().replace(".TW","").replace(".TWO","").replace(".TPEX","")
+    headers = {"Authorization": f"Bearer {TOKEN}", "Accept": "application/json"}
 
-def _kbar_fetch(id_key: str, sym: str, start: str, end_excl: str, token: str, timeout: int, max_retries: int) -> pd.DataFrame:
-    """先試「區間模式」；失敗/空 → 逐日 fallback（date 模式）。"""
-    interval = os.getenv("FINMIND_KBAR_INTERVAL", "1")
-    # 1) 區間模式（end_excl 的前一天做 end_inclusive）
-    end_inclusive = (datetime.strptime(end_excl, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
-    params = {"dataset": "TaiwanStockKBar", id_key: sym, "start_date": start, "end_date": end_inclusive, "time_interval": interval}
-    if token: params["token"] = token
-    try:
-        j = _http(params, timeout, max_retries)
-        df = pd.DataFrame(j.get("data", []))
-        if not df.empty:
-            return df
-    except Exception:
-        pass  # 進 fallback
-
-    # 2) 單日 fallback（date 模式；逐日拼接）
-    all_parts = []
-    s = datetime.strptime(start, "%Y-%m-%d")
-    e = datetime.strptime(end_excl, "%Y-%m-%d")
-    d = s
-    while d < e:
-        day = d.strftime("%Y-%m-%d")
-        p = {"dataset": "TaiwanStockKBar", id_key: sym, "date": day, "time_interval": interval}
-        if token: p["token"] = token
+    def _call(params: dict):
+        qs  = parse.urlencode(params)
+        req = request.Request(f"{BASE}?{qs}", headers=headers)
         try:
-            j = _http(p, timeout, max_retries)
-            part = pd.DataFrame(j.get("data", []))
-            if not part.empty:
-                all_parts.append(part)
-        except Exception:
-            pass
-        d += timedelta(days=1)
-        time.sleep(0.4)  # 溫和節流
-    if all_parts:
-        return pd.concat(all_parts, ignore_index=True)
-    return pd.DataFrame()
+            with request.urlopen(req, timeout=20) as r:
+                obj = json.loads(r.read().decode("utf-8", errors="ignore"))
+            return obj, None
+        except HTTPError as e:
+            try:
+                body = e.read().decode("utf-8", errors="ignore")
+            except Exception:
+                body = ""
+            return None, (e.code, body, params)
+        except URLError as e:
+            return None, (0, f"URLError: {e.reason}", params)
 
-def fetch_once(dataset: str, id_key: str, sym: str, start: str, end_excl: str, token: str, timeout: int, max_retries: int) -> pd.DataFrame:
-    if dataset == "TaiwanStockKBar":
-        return _kbar_fetch(id_key, sym, start, end_excl, token, timeout, max_retries)
-    params = {"dataset": dataset, id_key: sym, "start_date": start, "end_date": end_excl}  # end_excl 由 orchestrator 處理 +1d
-    if token: params["token"] = token
-    j = _http(params, timeout, max_retries)
-    return pd.DataFrame(j.get("data", []))
+    if "kbar" in ds:
+        shapes = []
+        interval = os.environ.get("FINMIND_KBAR_INTERVAL", "").strip()
+        st = f"{start} 00:00:00"; et = f"{start} 23:59:59"
+
+        # A) legacy form first (explicit intraday window)
+        if interval:
+            shapes.append({"dataset": dataset, "stock_id": sid, "start_time": st, "end_time": et, "time_interval": interval})
+        shapes.append({"dataset": dataset, "stock_id": sid, "start_time": st, "end_time": et})
+
+        # B) daily date form
+        if interval:
+            shapes.append({"dataset": dataset, "stock_id": sid, "date": start, "time_interval": interval})
+        shapes.append({"dataset": dataset, "stock_id": sid, "date": start})
+
+        # C) official data_id + start_date
+        shapes.append({"dataset": dataset, "data_id": sid, "start_date": start})
+
+        last_err = None
+        for p in shapes:
+            obj, err = _call(p)
+            if not err:
+                data = (obj or {}).get("data") or []
+                # treat empty as success (some days have no kbar)
+                if not data:
+                    return pd.DataFrame()
+                df = pd.DataFrame(data)
+                if "date" in df.columns:
+                    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+                if "stock_id" in df.columns:
+                    df["stock_id"] = df["stock_id"].astype(str)
+                return df
+            else:
+                last_err = err
+        code, body, p = last_err
+        raise RuntimeError(f"KBar HTTP {code} for {sid} on {start}. Params={p} Detail={body[:500]}")
+    else:
+        obj, err = _call({"dataset": dataset, "data_id": sid, "start_date": start, "end_date": end})
+        if err:
+            code, body, p = err
+            raise RuntimeError(f"{dataset} HTTP {code} for {sid}. Params={p} Detail={body[:500]}")
+        data = (obj or {}).get("data") or []
+        if not data:
+            return pd.DataFrame()
+        df = pd.DataFrame(data)
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        if "stock_id" in df.columns:
+            df["stock_id"] = df["stock_id"].astype(str)
+        return df
+
+def write_extra(df: pd.DataFrame, out_root: str, dataset: str) -> int:
+    if df is None or df.empty:
+        return 0
+    gdf = df.copy()
+    gdf["yyyymm"] = pd.to_datetime(gdf["date"], errors="coerce").dt.strftime("%Y%m")
+    total = 0
+    for ym, g in gdf.groupby("yyyymm"):
+        outdir = os.path.join(out_root, "silver", "alpha", "extra", dataset, f"yyyymm={ym}")
+        os.makedirs(outdir, exist_ok=True)
+        out = os.path.join(outdir, f"ing_extra_{dataset}_{ym}_{int(time.time()*1000)}.parquet")
+        g.drop(columns=["yyyymm"], errors="ignore").to_parquet(out, index=False)
+        total += len(g)
+    return total
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset", required=True)
-    ap.add_argument("--id-key", choices=["data_id","stock_id"], required=True)
-    ap.add_argument("--symbols", required=True)
-    ap.add_argument("--start", required=True)
-    ap.add_argument("--end", required=True)   # 已是 +1d 後的「不含」終點
-    ap.add_argument("--datahub-root", default="datahub")
-    ap.add_argument("--timeout", type=int, default=30)
-    ap.add_argument("--max-retries", type=int, default=3)
-    ap.add_argument("--rpm", type=int, default=int(os.getenv("FINMIND_THROTTLE_RPM","12")))
+    ap.add_argument("--datasets", nargs="+", required=True, help="FinMind datasets (comma or multi)")
+    ap.add_argument("--ids",       nargs="+", required=True, help="symbols (comma or multi)")
+    ap.add_argument("--date",      required=True, help="yyyy-MM-dd (single day)")
+    ap.add_argument("--end",       required=False, help="yyyy-MM-dd (exclusive); default date+1")
+    ap.add_argument("--out-root",  default="datahub")
     args = ap.parse_args()
 
-    token = os.getenv("FINMIND_TOKEN","")
-    root = pathlib.Path(args.datahub_root)
-    syms = [s.strip() for s in args.symbols.split(",") if s.strip()]
-    if not syms:
-        print("No symbols provided.", file=sys.stderr); sys.exit(2)
+    ds_list = alias_to_list(args.datasets)
+    ids     = norm_ids(alias_to_list(args.ids))
+    start   = datetime.date.fromisoformat(args.date).strftime("%Y-%m-%d")
+    end_ex  = args.end or (datetime.date.fromisoformat(args.date) + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
 
-    # 節流
-    rpm = max(1, args.rpm); pause = 60.0 / rpm
-    total_rows = 0
-    for i, sym in enumerate(syms, 1):
-        try:
-            df = fetch_once(args.dataset, args.id_key, sym, args.start, args.end, token, args.timeout, args.max_retries)
-            n = _write(df, root, args.dataset, sym, args.start, args.end)
-            print(f"OK {args.dataset} {sym}: rows={len(df)} files={1 if n>0 else 0}")
-            total_rows += len(df)
-        except Exception as e:
-            print(f"FAIL {args.dataset} {sym}: {e}", file=sys.stderr)
-            pass
-        if i < len(syms):
-            time.sleep(pause)
-    print(f"DONE {args.dataset}: symbols={len(syms)} total_rows={total_rows}")
+    rpm = float(os.environ.get("FINMIND_THROTTLE_RPM") or os.environ.get("FINMIND_QPS","10"))
+    if rpm <= 2.0:
+        rpm = max(6.0, rpm * 60.0)
+    sleep_sec = max(0.0, 60.0 / rpm)
+
+    print(f"== DateID extras == {start} → {end_ex} (end exclusive)  ids={len(ids)}  rpm≈{rpm:.1f}/min")
+    totals = []
+    for ds in ds_list:
+        rows = 0; calls = 0
+        for sid in ids:
+            try:
+                df = http_get_one(ds, sid, start, end_ex)
+                if df is not None and not df.empty:
+                    try:
+                        di = pd.to_datetime(df['date'], errors='coerce')
+                        df = df[di < pd.to_datetime(end_ex)]
+                    except Exception:
+                        pass
+                    rows += write_extra(df, args.out_root, ds)
+                calls += 1
+                time.sleep(sleep_sec)
+            except Exception as e:
+                print(f"[WARN] {ds} {sid}: {e}", file=sys.stderr)
+        print(f"OK {ds}: rows_written={rows} calls={calls}")
+        totals.append((ds, rows, calls))
+    print("DONE extras:", totals)
+
 if __name__ == "__main__":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
     main()
-

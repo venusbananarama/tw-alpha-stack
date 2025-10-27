@@ -1,0 +1,755 @@
+﻿#requires -Version 7
+<#
+  Run-DateID-Extras-History.ps1
+  目的：Date-ID 特攻線讀「全市場池表」，全股×全歷史掃描『難抓族』，落 extra/<Dataset>；不動四表主線。
+#>
+[CmdletBinding()]
+param(
+  [datetime]$Start,
+  [datetime]$End,
+  [int]$Batch = 300,
+  [int]$SleepMsBetweenBatches = 2000,
+  [ValidateRange(6,120)][int]$RPM = 10,
+  [string]$Datasets = 'TaiwanStockShareholding,TaiwanStockKBar,TaiwanStockMarketValue,TaiwanStockMarketValueWeight,TaiwanStockSplitPrice,TaiwanStockParValueChange,TaiwanStockCapitalReductionReferencePrice,TaiwanStockDelisting',
+  [switch]$Strict
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference='Stop'
+
+function Get-PoolIDs {
+  $candidates = @(
+    '.\configs\investable_universe.txt',
+    '.\universe\universe.tw_all.txt',
+    '.\universe\tw_all.txt',
+    '.\universe\all.txt'
+  )
+  $p = $candidates | Where-Object { Test-Path #requires -Version 7
+<#
+  Run-DateID-Extras-History.ps1
+  目的：Date-ID 特攻線讀「全市場池表」，全股×全歷史掃描『難抓族』，落 extra/<Dataset>；不動四表主線。
+#>
+[CmdletBinding()]
+param(
+  [datetime]$Start,
+  [datetime]$End,
+  [int]$Batch = 300,
+  [int]$SleepMsBetweenBatches = 2000,
+  [ValidateRange(6,120)][int]$RPM = 10,
+  [string]$Datasets = 'TaiwanStockShareholding,TaiwanStockKBar,TaiwanStockMarketValue,TaiwanStockMarketValueWeight,TaiwanStockSplitPrice,TaiwanStockParValueChange,TaiwanStockCapitalReductionReferencePrice,TaiwanStockDelisting',
+  [switch]$Strict
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference='Stop'
+$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+Set-Location $root
+if(-not $env:ALPHACITY_ALLOW){ $env:ALPHACITY_ALLOW = '1' }
+Remove-Item Env:PYTHONSTARTUP -ErrorAction SilentlyContinue | Out-Null
+
+$RUN = '.\tools\Run-DateID-Extras.ps1'
+if(-not (Test-Path $RUN)){ throw "找不到 $RUN" }
+
+# 交易日曆 → clamp 到台北今天(含)以前
+$cal = Import-Csv .\cal\trading_days.csv | ForEach-Object { [datetime]::ParseExact($_.date,'yyyy-MM-dd',$null) } | Sort-Object
+$todayTpe = (Get-Date).AddHours(8).Date
+$liveDays = @($cal | Where-Object { $_ -le $todayTpe })
+if(-not $PSBoundParameters.ContainsKey('Start')){ $Start = $liveDays[0] }
+if(-not $PSBoundParameters.ContainsKey('End'))  { $End   = $todayTpe }
+$days = @($liveDays | Where-Object { $_ -ge $Start.Date -and $_ -le $End.Date })
+if(-not $days){ throw "日期區間無交易日：$($Start.ToShortDateString())..$($End.ToShortDateString())" }
+
+# 全市場池 or 樣板展開
+if ($PSBoundParameters.ContainsKey("IDs")) {
+  $ids = Expand-IDPatterns @($IDs)
+} else {
+  $ids = Get-PoolIDs
+}
+if(-not $ids){ throw "IDs/Pool 為空，無法執行歷史掃描" }
+if(-not $ids){ throw "池表無有效四碼 ID：$POOL" }
+
+# KBar 預設 5 分
+if(-not $env:FINMIND_KBAR_INTERVAL){ $env:FINMIND_KBAR_INTERVAL='5' }
+$env:FINMIND_THROTTLE_RPM = [string]$RPM
+
+$log = 'reports\dateid_extras_history_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss')
+"POOL=$POOL  IDs=$($ids.Count)  DATES=$($days.Count)  BATCH=$Batch  RPM=$RPM  Datasets=$Datasets" | Tee-Object -FilePath $log
+$sets = ($Datasets -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+
+foreach($d in $days){
+  $ds = $d.ToString('yyyy-MM-dd')
+  Write-Host "== [$ds] =="
+  for($i=0; $i -lt $ids.Count; $i+=$Batch){
+    $j = [Math]::Min($i+$Batch-1, $ids.Count-1)
+    $chunk = $ids[$i..$j]
+    try{
+      pwsh -NoProfile -ExecutionPolicy Bypass -File $RUN -Date $ds -IDs ($chunk -join ',') -Datasets ($sets -join ',') -RPM $RPM *>> $log
+    } catch {
+      if($Strict){ throw } else { "[WARN][$ds][$i..$j] $($_.Exception.Message)" | Tee-Object -FilePath $log -Append }
+    }
+    if($SleepMsBetweenBatches -gt 0){ Start-Sleep -Milliseconds $SleepMsBetweenBatches }
+  }
+}
+"Done. Log: $log" | Tee-Object -FilePath $log
+ } | Select-Object -First 1
+  if(-not $p){ throw "找不到池表（configs\investable_universe.txt / universe\universe.tw_all.txt / tw_all.txt / all.txt）" }
+  return Get-Content $p | ForEach-Object { #requires -Version 7
+<#
+  Run-DateID-Extras-History.ps1
+  目的：Date-ID 特攻線讀「全市場池表」，全股×全歷史掃描『難抓族』，落 extra/<Dataset>；不動四表主線。
+#>
+[CmdletBinding()]
+param(
+  [datetime]$Start,
+  [datetime]$End,
+  [int]$Batch = 300,
+  [int]$SleepMsBetweenBatches = 2000,
+  [ValidateRange(6,120)][int]$RPM = 10,
+  [string]$Datasets = 'TaiwanStockShareholding,TaiwanStockKBar,TaiwanStockMarketValue,TaiwanStockMarketValueWeight,TaiwanStockSplitPrice,TaiwanStockParValueChange,TaiwanStockCapitalReductionReferencePrice,TaiwanStockDelisting',
+  [switch]$Strict
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference='Stop'
+$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+Set-Location $root
+if(-not $env:ALPHACITY_ALLOW){ $env:ALPHACITY_ALLOW = '1' }
+Remove-Item Env:PYTHONSTARTUP -ErrorAction SilentlyContinue | Out-Null
+
+$RUN = '.\tools\Run-DateID-Extras.ps1'
+if(-not (Test-Path $RUN)){ throw "找不到 $RUN" }
+
+# 交易日曆 → clamp 到台北今天(含)以前
+$cal = Import-Csv .\cal\trading_days.csv | ForEach-Object { [datetime]::ParseExact($_.date,'yyyy-MM-dd',$null) } | Sort-Object
+$todayTpe = (Get-Date).AddHours(8).Date
+$liveDays = @($cal | Where-Object { $_ -le $todayTpe })
+if(-not $PSBoundParameters.ContainsKey('Start')){ $Start = $liveDays[0] }
+if(-not $PSBoundParameters.ContainsKey('End'))  { $End   = $todayTpe }
+$days = @($liveDays | Where-Object { $_ -ge $Start.Date -and $_ -le $End.Date })
+if(-not $days){ throw "日期區間無交易日：$($Start.ToShortDateString())..$($End.ToShortDateString())" }
+
+# 全市場池 or 樣板展開
+if ($PSBoundParameters.ContainsKey("IDs")) {
+  $ids = Expand-IDPatterns @($IDs)
+} else {
+  $ids = Get-PoolIDs
+}
+if(-not $ids){ throw "IDs/Pool 為空，無法執行歷史掃描" }
+if(-not $ids){ throw "池表無有效四碼 ID：$POOL" }
+
+# KBar 預設 5 分
+if(-not $env:FINMIND_KBAR_INTERVAL){ $env:FINMIND_KBAR_INTERVAL='5' }
+$env:FINMIND_THROTTLE_RPM = [string]$RPM
+
+$log = 'reports\dateid_extras_history_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss')
+"POOL=$POOL  IDs=$($ids.Count)  DATES=$($days.Count)  BATCH=$Batch  RPM=$RPM  Datasets=$Datasets" | Tee-Object -FilePath $log
+$sets = ($Datasets -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+
+foreach($d in $days){
+  $ds = $d.ToString('yyyy-MM-dd')
+  Write-Host "== [$ds] =="
+  for($i=0; $i -lt $ids.Count; $i+=$Batch){
+    $j = [Math]::Min($i+$Batch-1, $ids.Count-1)
+    $chunk = $ids[$i..$j]
+    try{
+      pwsh -NoProfile -ExecutionPolicy Bypass -File $RUN -Date $ds -IDs ($chunk -join ',') -Datasets ($sets -join ',') -RPM $RPM *>> $log
+    } catch {
+      if($Strict){ throw } else { "[WARN][$ds][$i..$j] $($_.Exception.Message)" | Tee-Object -FilePath $log -Append }
+    }
+    if($SleepMsBetweenBatches -gt 0){ Start-Sleep -Milliseconds $SleepMsBetweenBatches }
+  }
+}
+"Done. Log: $log" | Tee-Object -FilePath $log
+.Trim().Replace('.TW','') } | Where-Object { #requires -Version 7
+<#
+  Run-DateID-Extras-History.ps1
+  目的：Date-ID 特攻線讀「全市場池表」，全股×全歷史掃描『難抓族』，落 extra/<Dataset>；不動四表主線。
+#>
+[CmdletBinding()]
+param(
+  [datetime]$Start,
+  [datetime]$End,
+  [int]$Batch = 300,
+  [int]$SleepMsBetweenBatches = 2000,
+  [ValidateRange(6,120)][int]$RPM = 10,
+  [string]$Datasets = 'TaiwanStockShareholding,TaiwanStockKBar,TaiwanStockMarketValue,TaiwanStockMarketValueWeight,TaiwanStockSplitPrice,TaiwanStockParValueChange,TaiwanStockCapitalReductionReferencePrice,TaiwanStockDelisting',
+  [switch]$Strict
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference='Stop'
+$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+Set-Location $root
+if(-not $env:ALPHACITY_ALLOW){ $env:ALPHACITY_ALLOW = '1' }
+Remove-Item Env:PYTHONSTARTUP -ErrorAction SilentlyContinue | Out-Null
+
+$RUN = '.\tools\Run-DateID-Extras.ps1'
+if(-not (Test-Path $RUN)){ throw "找不到 $RUN" }
+
+# 交易日曆 → clamp 到台北今天(含)以前
+$cal = Import-Csv .\cal\trading_days.csv | ForEach-Object { [datetime]::ParseExact($_.date,'yyyy-MM-dd',$null) } | Sort-Object
+$todayTpe = (Get-Date).AddHours(8).Date
+$liveDays = @($cal | Where-Object { $_ -le $todayTpe })
+if(-not $PSBoundParameters.ContainsKey('Start')){ $Start = $liveDays[0] }
+if(-not $PSBoundParameters.ContainsKey('End'))  { $End   = $todayTpe }
+$days = @($liveDays | Where-Object { $_ -ge $Start.Date -and $_ -le $End.Date })
+if(-not $days){ throw "日期區間無交易日：$($Start.ToShortDateString())..$($End.ToShortDateString())" }
+
+# 全市場池 or 樣板展開
+if ($PSBoundParameters.ContainsKey("IDs")) {
+  $ids = Expand-IDPatterns @($IDs)
+} else {
+  $ids = Get-PoolIDs
+}
+if(-not $ids){ throw "IDs/Pool 為空，無法執行歷史掃描" }
+if(-not $ids){ throw "池表無有效四碼 ID：$POOL" }
+
+# KBar 預設 5 分
+if(-not $env:FINMIND_KBAR_INTERVAL){ $env:FINMIND_KBAR_INTERVAL='5' }
+$env:FINMIND_THROTTLE_RPM = [string]$RPM
+
+$log = 'reports\dateid_extras_history_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss')
+"POOL=$POOL  IDs=$($ids.Count)  DATES=$($days.Count)  BATCH=$Batch  RPM=$RPM  Datasets=$Datasets" | Tee-Object -FilePath $log
+$sets = ($Datasets -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+
+foreach($d in $days){
+  $ds = $d.ToString('yyyy-MM-dd')
+  Write-Host "== [$ds] =="
+  for($i=0; $i -lt $ids.Count; $i+=$Batch){
+    $j = [Math]::Min($i+$Batch-1, $ids.Count-1)
+    $chunk = $ids[$i..$j]
+    try{
+      pwsh -NoProfile -ExecutionPolicy Bypass -File $RUN -Date $ds -IDs ($chunk -join ',') -Datasets ($sets -join ',') -RPM $RPM *>> $log
+    } catch {
+      if($Strict){ throw } else { "[WARN][$ds][$i..$j] $($_.Exception.Message)" | Tee-Object -FilePath $log -Append }
+    }
+    if($SleepMsBetweenBatches -gt 0){ Start-Sleep -Milliseconds $SleepMsBetweenBatches }
+  }
+}
+"Done. Log: $log" | Tee-Object -FilePath $log
+ -match '^\d{4}$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+Set-Location $root
+if(-not $env:ALPHACITY_ALLOW){ $env:ALPHACITY_ALLOW = '1' }
+Remove-Item Env:PYTHONSTARTUP -ErrorAction SilentlyContinue | Out-Null
+
+$RUN = '.\tools\Run-DateID-Extras.ps1'
+if(-not (Test-Path $RUN)){ throw "找不到 $RUN" }
+
+# 交易日曆 → clamp 到台北今天(含)以前
+$cal = Import-Csv .\cal\trading_days.csv | ForEach-Object { [datetime]::ParseExact($_.date,'yyyy-MM-dd',$null) } | Sort-Object
+$todayTpe = (Get-Date).AddHours(8).Date
+$liveDays = @($cal | Where-Object { $_ -le $todayTpe })
+if(-not $PSBoundParameters.ContainsKey('Start')){ $Start = $liveDays[0] }
+if(-not $PSBoundParameters.ContainsKey('End'))  { $End   = $todayTpe }
+$days = @($liveDays | Where-Object { $_ -ge $Start.Date -and $_ -le $End.Date })
+if(-not $days){ throw "日期區間無交易日：$($Start.ToShortDateString())..$($End.ToShortDateString())" }
+
+# 全市場池 or 樣板展開
+if ($PSBoundParameters.ContainsKey("IDs")) {
+  $ids = Expand-IDPatterns @($IDs)
+} else {
+  $ids = Get-PoolIDs
+}
+if(-not $ids){ throw "IDs/Pool 為空，無法執行歷史掃描" }
+if(-not $ids){ throw "池表無有效四碼 ID：$POOL" }
+
+# KBar 預設 5 分
+if(-not $env:FINMIND_KBAR_INTERVAL){ $env:FINMIND_KBAR_INTERVAL='5' }
+$env:FINMIND_THROTTLE_RPM = [string]$RPM
+
+$log = 'reports\dateid_extras_history_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss')
+"POOL=$POOL  IDs=$($ids.Count)  DATES=$($days.Count)  BATCH=$Batch  RPM=$RPM  Datasets=$Datasets" | Tee-Object -FilePath $log
+$sets = ($Datasets -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+
+foreach($d in $days){
+  $ds = $d.ToString('yyyy-MM-dd')
+  Write-Host "== [$ds] =="
+  for($i=0; $i -lt $ids.Count; $i+=$Batch){
+    $j = [Math]::Min($i+$Batch-1, $ids.Count-1)
+    $chunk = $ids[$i..$j]
+    try{
+      pwsh -NoProfile -ExecutionPolicy Bypass -File $RUN -Date $ds -IDs ($chunk -join ',') -Datasets ($sets -join ',') -RPM $RPM *>> $log
+    } catch {
+      if($Strict){ throw } else { "[WARN][$ds][$i..$j] $($_.Exception.Message)" | Tee-Object -FilePath $log -Append }
+    }
+    if($SleepMsBetweenBatches -gt 0){ Start-Sleep -Milliseconds $SleepMsBetweenBatches }
+  }
+}
+"Done. Log: $log" | Tee-Object -FilePath $log
+ } | Sort-Object -Unique
+}
+
+function Convert-TokenToLike4([string]$token){
+  $t = ($token -replace '\.TW$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+Set-Location $root
+if(-not $env:ALPHACITY_ALLOW){ $env:ALPHACITY_ALLOW = '1' }
+Remove-Item Env:PYTHONSTARTUP -ErrorAction SilentlyContinue | Out-Null
+
+$RUN = '.\tools\Run-DateID-Extras.ps1'
+if(-not (Test-Path $RUN)){ throw "找不到 $RUN" }
+
+# 交易日曆 → clamp 到台北今天(含)以前
+$cal = Import-Csv .\cal\trading_days.csv | ForEach-Object { [datetime]::ParseExact($_.date,'yyyy-MM-dd',$null) } | Sort-Object
+$todayTpe = (Get-Date).AddHours(8).Date
+$liveDays = @($cal | Where-Object { $_ -le $todayTpe })
+if(-not $PSBoundParameters.ContainsKey('Start')){ $Start = $liveDays[0] }
+if(-not $PSBoundParameters.ContainsKey('End'))  { $End   = $todayTpe }
+$days = @($liveDays | Where-Object { $_ -ge $Start.Date -and $_ -le $End.Date })
+if(-not $days){ throw "日期區間無交易日：$($Start.ToShortDateString())..$($End.ToShortDateString())" }
+
+# 全市場池 or 樣板展開
+if ($PSBoundParameters.ContainsKey("IDs")) {
+  $ids = Expand-IDPatterns @($IDs)
+} else {
+  $ids = Get-PoolIDs
+}
+if(-not $ids){ throw "IDs/Pool 為空，無法執行歷史掃描" }
+if(-not $ids){ throw "池表無有效四碼 ID：$POOL" }
+
+# KBar 預設 5 分
+if(-not $env:FINMIND_KBAR_INTERVAL){ $env:FINMIND_KBAR_INTERVAL='5' }
+$env:FINMIND_THROTTLE_RPM = [string]$RPM
+
+$log = 'reports\dateid_extras_history_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss')
+"POOL=$POOL  IDs=$($ids.Count)  DATES=$($days.Count)  BATCH=$Batch  RPM=$RPM  Datasets=$Datasets" | Tee-Object -FilePath $log
+$sets = ($Datasets -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+
+foreach($d in $days){
+  $ds = $d.ToString('yyyy-MM-dd')
+  Write-Host "== [$ds] =="
+  for($i=0; $i -lt $ids.Count; $i+=$Batch){
+    $j = [Math]::Min($i+$Batch-1, $ids.Count-1)
+    $chunk = $ids[$i..$j]
+    try{
+      pwsh -NoProfile -ExecutionPolicy Bypass -File $RUN -Date $ds -IDs ($chunk -join ',') -Datasets ($sets -join ',') -RPM $RPM *>> $log
+    } catch {
+      if($Strict){ throw } else { "[WARN][$ds][$i..$j] $($_.Exception.Message)" | Tee-Object -FilePath $log -Append }
+    }
+    if($SleepMsBetweenBatches -gt 0){ Start-Sleep -Milliseconds $SleepMsBetweenBatches }
+  }
+}
+"Done. Log: $log" | Tee-Object -FilePath $log
+,'').Trim()
+  if ($t -match '^(ALL|TSE)$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+Set-Location $root
+if(-not $env:ALPHACITY_ALLOW){ $env:ALPHACITY_ALLOW = '1' }
+Remove-Item Env:PYTHONSTARTUP -ErrorAction SilentlyContinue | Out-Null
+
+$RUN = '.\tools\Run-DateID-Extras.ps1'
+if(-not (Test-Path $RUN)){ throw "找不到 $RUN" }
+
+# 交易日曆 → clamp 到台北今天(含)以前
+$cal = Import-Csv .\cal\trading_days.csv | ForEach-Object { [datetime]::ParseExact($_.date,'yyyy-MM-dd',$null) } | Sort-Object
+$todayTpe = (Get-Date).AddHours(8).Date
+$liveDays = @($cal | Where-Object { $_ -le $todayTpe })
+if(-not $PSBoundParameters.ContainsKey('Start')){ $Start = $liveDays[0] }
+if(-not $PSBoundParameters.ContainsKey('End'))  { $End   = $todayTpe }
+$days = @($liveDays | Where-Object { $_ -ge $Start.Date -and $_ -le $End.Date })
+if(-not $days){ throw "日期區間無交易日：$($Start.ToShortDateString())..$($End.ToShortDateString())" }
+
+# 全市場池 or 樣板展開
+if ($PSBoundParameters.ContainsKey("IDs")) {
+  $ids = Expand-IDPatterns @($IDs)
+} else {
+  $ids = Get-PoolIDs
+}
+if(-not $ids){ throw "IDs/Pool 為空，無法執行歷史掃描" }
+if(-not $ids){ throw "池表無有效四碼 ID：$POOL" }
+
+# KBar 預設 5 分
+if(-not $env:FINMIND_KBAR_INTERVAL){ $env:FINMIND_KBAR_INTERVAL='5' }
+$env:FINMIND_THROTTLE_RPM = [string]$RPM
+
+$log = 'reports\dateid_extras_history_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss')
+"POOL=$POOL  IDs=$($ids.Count)  DATES=$($days.Count)  BATCH=$Batch  RPM=$RPM  Datasets=$Datasets" | Tee-Object -FilePath $log
+$sets = ($Datasets -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+
+foreach($d in $days){
+  $ds = $d.ToString('yyyy-MM-dd')
+  Write-Host "== [$ds] =="
+  for($i=0; $i -lt $ids.Count; $i+=$Batch){
+    $j = [Math]::Min($i+$Batch-1, $ids.Count-1)
+    $chunk = $ids[$i..$j]
+    try{
+      pwsh -NoProfile -ExecutionPolicy Bypass -File $RUN -Date $ds -IDs ($chunk -join ',') -Datasets ($sets -join ',') -RPM $RPM *>> $log
+    } catch {
+      if($Strict){ throw } else { "[WARN][$ds][$i..$j] $($_.Exception.Message)" | Tee-Object -FilePath $log -Append }
+    }
+    if($SleepMsBetweenBatches -gt 0){ Start-Sleep -Milliseconds $SleepMsBetweenBatches }
+  }
+}
+"Done. Log: $log" | Tee-Object -FilePath $log
+) { return '????' }
+  $like = ''
+  foreach($ch in $t.ToCharArray()){
+    if ($like.Length -ge 4) { break }
+    switch -Regex ($ch) {
+      '^\d$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+Set-Location $root
+if(-not $env:ALPHACITY_ALLOW){ $env:ALPHACITY_ALLOW = '1' }
+Remove-Item Env:PYTHONSTARTUP -ErrorAction SilentlyContinue | Out-Null
+
+$RUN = '.\tools\Run-DateID-Extras.ps1'
+if(-not (Test-Path $RUN)){ throw "找不到 $RUN" }
+
+# 交易日曆 → clamp 到台北今天(含)以前
+$cal = Import-Csv .\cal\trading_days.csv | ForEach-Object { [datetime]::ParseExact($_.date,'yyyy-MM-dd',$null) } | Sort-Object
+$todayTpe = (Get-Date).AddHours(8).Date
+$liveDays = @($cal | Where-Object { $_ -le $todayTpe })
+if(-not $PSBoundParameters.ContainsKey('Start')){ $Start = $liveDays[0] }
+if(-not $PSBoundParameters.ContainsKey('End'))  { $End   = $todayTpe }
+$days = @($liveDays | Where-Object { $_ -ge $Start.Date -and $_ -le $End.Date })
+if(-not $days){ throw "日期區間無交易日：$($Start.ToShortDateString())..$($End.ToShortDateString())" }
+
+# 全市場池 or 樣板展開
+if ($PSBoundParameters.ContainsKey("IDs")) {
+  $ids = Expand-IDPatterns @($IDs)
+} else {
+  $ids = Get-PoolIDs
+}
+if(-not $ids){ throw "IDs/Pool 為空，無法執行歷史掃描" }
+if(-not $ids){ throw "池表無有效四碼 ID：$POOL" }
+
+# KBar 預設 5 分
+if(-not $env:FINMIND_KBAR_INTERVAL){ $env:FINMIND_KBAR_INTERVAL='5' }
+$env:FINMIND_THROTTLE_RPM = [string]$RPM
+
+$log = 'reports\dateid_extras_history_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss')
+"POOL=$POOL  IDs=$($ids.Count)  DATES=$($days.Count)  BATCH=$Batch  RPM=$RPM  Datasets=$Datasets" | Tee-Object -FilePath $log
+$sets = ($Datasets -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+
+foreach($d in $days){
+  $ds = $d.ToString('yyyy-MM-dd')
+  Write-Host "== [$ds] =="
+  for($i=0; $i -lt $ids.Count; $i+=$Batch){
+    $j = [Math]::Min($i+$Batch-1, $ids.Count-1)
+    $chunk = $ids[$i..$j]
+    try{
+      pwsh -NoProfile -ExecutionPolicy Bypass -File $RUN -Date $ds -IDs ($chunk -join ',') -Datasets ($sets -join ',') -RPM $RPM *>> $log
+    } catch {
+      if($Strict){ throw } else { "[WARN][$ds][$i..$j] $($_.Exception.Message)" | Tee-Object -FilePath $log -Append }
+    }
+    if($SleepMsBetweenBatches -gt 0){ Start-Sleep -Milliseconds $SleepMsBetweenBatches }
+  }
+}
+"Done. Log: $log" | Tee-Object -FilePath $log
+     { $like += $ch; break }
+      '^[Xx\?]$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+Set-Location $root
+if(-not $env:ALPHACITY_ALLOW){ $env:ALPHACITY_ALLOW = '1' }
+Remove-Item Env:PYTHONSTARTUP -ErrorAction SilentlyContinue | Out-Null
+
+$RUN = '.\tools\Run-DateID-Extras.ps1'
+if(-not (Test-Path $RUN)){ throw "找不到 $RUN" }
+
+# 交易日曆 → clamp 到台北今天(含)以前
+$cal = Import-Csv .\cal\trading_days.csv | ForEach-Object { [datetime]::ParseExact($_.date,'yyyy-MM-dd',$null) } | Sort-Object
+$todayTpe = (Get-Date).AddHours(8).Date
+$liveDays = @($cal | Where-Object { $_ -le $todayTpe })
+if(-not $PSBoundParameters.ContainsKey('Start')){ $Start = $liveDays[0] }
+if(-not $PSBoundParameters.ContainsKey('End'))  { $End   = $todayTpe }
+$days = @($liveDays | Where-Object { $_ -ge $Start.Date -and $_ -le $End.Date })
+if(-not $days){ throw "日期區間無交易日：$($Start.ToShortDateString())..$($End.ToShortDateString())" }
+
+# 全市場池 or 樣板展開
+if ($PSBoundParameters.ContainsKey("IDs")) {
+  $ids = Expand-IDPatterns @($IDs)
+} else {
+  $ids = Get-PoolIDs
+}
+if(-not $ids){ throw "IDs/Pool 為空，無法執行歷史掃描" }
+if(-not $ids){ throw "池表無有效四碼 ID：$POOL" }
+
+# KBar 預設 5 分
+if(-not $env:FINMIND_KBAR_INTERVAL){ $env:FINMIND_KBAR_INTERVAL='5' }
+$env:FINMIND_THROTTLE_RPM = [string]$RPM
+
+$log = 'reports\dateid_extras_history_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss')
+"POOL=$POOL  IDs=$($ids.Count)  DATES=$($days.Count)  BATCH=$Batch  RPM=$RPM  Datasets=$Datasets" | Tee-Object -FilePath $log
+$sets = ($Datasets -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+
+foreach($d in $days){
+  $ds = $d.ToString('yyyy-MM-dd')
+  Write-Host "== [$ds] =="
+  for($i=0; $i -lt $ids.Count; $i+=$Batch){
+    $j = [Math]::Min($i+$Batch-1, $ids.Count-1)
+    $chunk = $ids[$i..$j]
+    try{
+      pwsh -NoProfile -ExecutionPolicy Bypass -File $RUN -Date $ds -IDs ($chunk -join ',') -Datasets ($sets -join ',') -RPM $RPM *>> $log
+    } catch {
+      if($Strict){ throw } else { "[WARN][$ds][$i..$j] $($_.Exception.Message)" | Tee-Object -FilePath $log -Append }
+    }
+    if($SleepMsBetweenBatches -gt 0){ Start-Sleep -Milliseconds $SleepMsBetweenBatches }
+  }
+}
+"Done. Log: $log" | Tee-Object -FilePath $log
+ { $like += '?'; break }
+      '^\*$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+Set-Location $root
+if(-not $env:ALPHACITY_ALLOW){ $env:ALPHACITY_ALLOW = '1' }
+Remove-Item Env:PYTHONSTARTUP -ErrorAction SilentlyContinue | Out-Null
+
+$RUN = '.\tools\Run-DateID-Extras.ps1'
+if(-not (Test-Path $RUN)){ throw "找不到 $RUN" }
+
+# 交易日曆 → clamp 到台北今天(含)以前
+$cal = Import-Csv .\cal\trading_days.csv | ForEach-Object { [datetime]::ParseExact($_.date,'yyyy-MM-dd',$null) } | Sort-Object
+$todayTpe = (Get-Date).AddHours(8).Date
+$liveDays = @($cal | Where-Object { $_ -le $todayTpe })
+if(-not $PSBoundParameters.ContainsKey('Start')){ $Start = $liveDays[0] }
+if(-not $PSBoundParameters.ContainsKey('End'))  { $End   = $todayTpe }
+$days = @($liveDays | Where-Object { $_ -ge $Start.Date -and $_ -le $End.Date })
+if(-not $days){ throw "日期區間無交易日：$($Start.ToShortDateString())..$($End.ToShortDateString())" }
+
+# 全市場池 or 樣板展開
+if ($PSBoundParameters.ContainsKey("IDs")) {
+  $ids = Expand-IDPatterns @($IDs)
+} else {
+  $ids = Get-PoolIDs
+}
+if(-not $ids){ throw "IDs/Pool 為空，無法執行歷史掃描" }
+if(-not $ids){ throw "池表無有效四碼 ID：$POOL" }
+
+# KBar 預設 5 分
+if(-not $env:FINMIND_KBAR_INTERVAL){ $env:FINMIND_KBAR_INTERVAL='5' }
+$env:FINMIND_THROTTLE_RPM = [string]$RPM
+
+$log = 'reports\dateid_extras_history_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss')
+"POOL=$POOL  IDs=$($ids.Count)  DATES=$($days.Count)  BATCH=$Batch  RPM=$RPM  Datasets=$Datasets" | Tee-Object -FilePath $log
+$sets = ($Datasets -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+
+foreach($d in $days){
+  $ds = $d.ToString('yyyy-MM-dd')
+  Write-Host "== [$ds] =="
+  for($i=0; $i -lt $ids.Count; $i+=$Batch){
+    $j = [Math]::Min($i+$Batch-1, $ids.Count-1)
+    $chunk = $ids[$i..$j]
+    try{
+      pwsh -NoProfile -ExecutionPolicy Bypass -File $RUN -Date $ds -IDs ($chunk -join ',') -Datasets ($sets -join ',') -RPM $RPM *>> $log
+    } catch {
+      if($Strict){ throw } else { "[WARN][$ds][$i..$j] $($_.Exception.Message)" | Tee-Object -FilePath $log -Append }
+    }
+    if($SleepMsBetweenBatches -gt 0){ Start-Sleep -Milliseconds $SleepMsBetweenBatches }
+  }
+}
+"Done. Log: $log" | Tee-Object -FilePath $log
+     { while($like.Length -lt 4){ $like += '?' }; break }
+      default    { break }
+    }
+  }
+  while($like.Length -lt 4){ $like += '?' }
+  return $like
+}
+
+function Expand-IDPatterns([string[]]$IDs){
+  $pool = Get-PoolIDs
+  $set  = New-Object System.Collections.Generic.HashSet[string]
+  foreach($tok in @($IDs)){
+    foreach($raw in ( ($tok -is [string] -and $tok -match ',') ? $tok.Split(',') : @($tok) )){
+      $t = ($raw -replace '\.TW$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+Set-Location $root
+if(-not $env:ALPHACITY_ALLOW){ $env:ALPHACITY_ALLOW = '1' }
+Remove-Item Env:PYTHONSTARTUP -ErrorAction SilentlyContinue | Out-Null
+
+$RUN = '.\tools\Run-DateID-Extras.ps1'
+if(-not (Test-Path $RUN)){ throw "找不到 $RUN" }
+
+# 交易日曆 → clamp 到台北今天(含)以前
+$cal = Import-Csv .\cal\trading_days.csv | ForEach-Object { [datetime]::ParseExact($_.date,'yyyy-MM-dd',$null) } | Sort-Object
+$todayTpe = (Get-Date).AddHours(8).Date
+$liveDays = @($cal | Where-Object { $_ -le $todayTpe })
+if(-not $PSBoundParameters.ContainsKey('Start')){ $Start = $liveDays[0] }
+if(-not $PSBoundParameters.ContainsKey('End'))  { $End   = $todayTpe }
+$days = @($liveDays | Where-Object { $_ -ge $Start.Date -and $_ -le $End.Date })
+if(-not $days){ throw "日期區間無交易日：$($Start.ToShortDateString())..$($End.ToShortDateString())" }
+
+# 全市場池 or 樣板展開
+if ($PSBoundParameters.ContainsKey("IDs")) {
+  $ids = Expand-IDPatterns @($IDs)
+} else {
+  $ids = Get-PoolIDs
+}
+if(-not $ids){ throw "IDs/Pool 為空，無法執行歷史掃描" }
+if(-not $ids){ throw "池表無有效四碼 ID：$POOL" }
+
+# KBar 預設 5 分
+if(-not $env:FINMIND_KBAR_INTERVAL){ $env:FINMIND_KBAR_INTERVAL='5' }
+$env:FINMIND_THROTTLE_RPM = [string]$RPM
+
+$log = 'reports\dateid_extras_history_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss')
+"POOL=$POOL  IDs=$($ids.Count)  DATES=$($days.Count)  BATCH=$Batch  RPM=$RPM  Datasets=$Datasets" | Tee-Object -FilePath $log
+$sets = ($Datasets -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+
+foreach($d in $days){
+  $ds = $d.ToString('yyyy-MM-dd')
+  Write-Host "== [$ds] =="
+  for($i=0; $i -lt $ids.Count; $i+=$Batch){
+    $j = [Math]::Min($i+$Batch-1, $ids.Count-1)
+    $chunk = $ids[$i..$j]
+    try{
+      pwsh -NoProfile -ExecutionPolicy Bypass -File $RUN -Date $ds -IDs ($chunk -join ',') -Datasets ($sets -join ',') -RPM $RPM *>> $log
+    } catch {
+      if($Strict){ throw } else { "[WARN][$ds][$i..$j] $($_.Exception.Message)" | Tee-Object -FilePath $log -Append }
+    }
+    if($SleepMsBetweenBatches -gt 0){ Start-Sleep -Milliseconds $SleepMsBetweenBatches }
+  }
+}
+"Done. Log: $log" | Tee-Object -FilePath $log
+,'').Trim()
+      if (-not $t) { continue }
+      if ($t -match '^(ALL|TSE)$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+Set-Location $root
+if(-not $env:ALPHACITY_ALLOW){ $env:ALPHACITY_ALLOW = '1' }
+Remove-Item Env:PYTHONSTARTUP -ErrorAction SilentlyContinue | Out-Null
+
+$RUN = '.\tools\Run-DateID-Extras.ps1'
+if(-not (Test-Path $RUN)){ throw "找不到 $RUN" }
+
+# 交易日曆 → clamp 到台北今天(含)以前
+$cal = Import-Csv .\cal\trading_days.csv | ForEach-Object { [datetime]::ParseExact($_.date,'yyyy-MM-dd',$null) } | Sort-Object
+$todayTpe = (Get-Date).AddHours(8).Date
+$liveDays = @($cal | Where-Object { $_ -le $todayTpe })
+if(-not $PSBoundParameters.ContainsKey('Start')){ $Start = $liveDays[0] }
+if(-not $PSBoundParameters.ContainsKey('End'))  { $End   = $todayTpe }
+$days = @($liveDays | Where-Object { $_ -ge $Start.Date -and $_ -le $End.Date })
+if(-not $days){ throw "日期區間無交易日：$($Start.ToShortDateString())..$($End.ToShortDateString())" }
+
+# 全市場池 or 樣板展開
+if ($PSBoundParameters.ContainsKey("IDs")) {
+  $ids = Expand-IDPatterns @($IDs)
+} else {
+  $ids = Get-PoolIDs
+}
+if(-not $ids){ throw "IDs/Pool 為空，無法執行歷史掃描" }
+if(-not $ids){ throw "池表無有效四碼 ID：$POOL" }
+
+# KBar 預設 5 分
+if(-not $env:FINMIND_KBAR_INTERVAL){ $env:FINMIND_KBAR_INTERVAL='5' }
+$env:FINMIND_THROTTLE_RPM = [string]$RPM
+
+$log = 'reports\dateid_extras_history_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss')
+"POOL=$POOL  IDs=$($ids.Count)  DATES=$($days.Count)  BATCH=$Batch  RPM=$RPM  Datasets=$Datasets" | Tee-Object -FilePath $log
+$sets = ($Datasets -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+
+foreach($d in $days){
+  $ds = $d.ToString('yyyy-MM-dd')
+  Write-Host "== [$ds] =="
+  for($i=0; $i -lt $ids.Count; $i+=$Batch){
+    $j = [Math]::Min($i+$Batch-1, $ids.Count-1)
+    $chunk = $ids[$i..$j]
+    try{
+      pwsh -NoProfile -ExecutionPolicy Bypass -File $RUN -Date $ds -IDs ($chunk -join ',') -Datasets ($sets -join ',') -RPM $RPM *>> $log
+    } catch {
+      if($Strict){ throw } else { "[WARN][$ds][$i..$j] $($_.Exception.Message)" | Tee-Object -FilePath $log -Append }
+    }
+    if($SleepMsBetweenBatches -gt 0){ Start-Sleep -Milliseconds $SleepMsBetweenBatches }
+  }
+}
+"Done. Log: $log" | Tee-Object -FilePath $log
+){ foreach($id in $pool){ [void]$set.Add($id) }; continue }
+      if ($t -match '^[0-9]{4}$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+Set-Location $root
+if(-not $env:ALPHACITY_ALLOW){ $env:ALPHACITY_ALLOW = '1' }
+Remove-Item Env:PYTHONSTARTUP -ErrorAction SilentlyContinue | Out-Null
+
+$RUN = '.\tools\Run-DateID-Extras.ps1'
+if(-not (Test-Path $RUN)){ throw "找不到 $RUN" }
+
+# 交易日曆 → clamp 到台北今天(含)以前
+$cal = Import-Csv .\cal\trading_days.csv | ForEach-Object { [datetime]::ParseExact($_.date,'yyyy-MM-dd',$null) } | Sort-Object
+$todayTpe = (Get-Date).AddHours(8).Date
+$liveDays = @($cal | Where-Object { $_ -le $todayTpe })
+if(-not $PSBoundParameters.ContainsKey('Start')){ $Start = $liveDays[0] }
+if(-not $PSBoundParameters.ContainsKey('End'))  { $End   = $todayTpe }
+$days = @($liveDays | Where-Object { $_ -ge $Start.Date -and $_ -le $End.Date })
+if(-not $days){ throw "日期區間無交易日：$($Start.ToShortDateString())..$($End.ToShortDateString())" }
+
+# 全市場池 or 樣板展開
+if ($PSBoundParameters.ContainsKey("IDs")) {
+  $ids = Expand-IDPatterns @($IDs)
+} else {
+  $ids = Get-PoolIDs
+}
+if(-not $ids){ throw "IDs/Pool 為空，無法執行歷史掃描" }
+if(-not $ids){ throw "池表無有效四碼 ID：$POOL" }
+
+# KBar 預設 5 分
+if(-not $env:FINMIND_KBAR_INTERVAL){ $env:FINMIND_KBAR_INTERVAL='5' }
+$env:FINMIND_THROTTLE_RPM = [string]$RPM
+
+$log = 'reports\dateid_extras_history_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss')
+"POOL=$POOL  IDs=$($ids.Count)  DATES=$($days.Count)  BATCH=$Batch  RPM=$RPM  Datasets=$Datasets" | Tee-Object -FilePath $log
+$sets = ($Datasets -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+
+foreach($d in $days){
+  $ds = $d.ToString('yyyy-MM-dd')
+  Write-Host "== [$ds] =="
+  for($i=0; $i -lt $ids.Count; $i+=$Batch){
+    $j = [Math]::Min($i+$Batch-1, $ids.Count-1)
+    $chunk = $ids[$i..$j]
+    try{
+      pwsh -NoProfile -ExecutionPolicy Bypass -File $RUN -Date $ds -IDs ($chunk -join ',') -Datasets ($sets -join ',') -RPM $RPM *>> $log
+    } catch {
+      if($Strict){ throw } else { "[WARN][$ds][$i..$j] $($_.Exception.Message)" | Tee-Object -FilePath $log -Append }
+    }
+    if($SleepMsBetweenBatches -gt 0){ Start-Sleep -Milliseconds $SleepMsBetweenBatches }
+  }
+}
+"Done. Log: $log" | Tee-Object -FilePath $log
+){ [void]$set.Add($t); continue }
+      $like = Convert-TokenToLike4 $t
+      foreach($id in $pool){ if ($id -like $like) { [void]$set.Add($id) } }
+    }
+  }
+  return @($set | Sort-Object)
+}
+$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+Set-Location $root
+if(-not $env:ALPHACITY_ALLOW){ $env:ALPHACITY_ALLOW = '1' }
+Remove-Item Env:PYTHONSTARTUP -ErrorAction SilentlyContinue | Out-Null
+
+$RUN = '.\tools\Run-DateID-Extras.ps1'
+if(-not (Test-Path $RUN)){ throw "找不到 $RUN" }
+
+# 交易日曆 → clamp 到台北今天(含)以前
+$cal = Import-Csv .\cal\trading_days.csv | ForEach-Object { [datetime]::ParseExact($_.date,'yyyy-MM-dd',$null) } | Sort-Object
+$todayTpe = (Get-Date).AddHours(8).Date
+$liveDays = @($cal | Where-Object { $_ -le $todayTpe })
+if(-not $PSBoundParameters.ContainsKey('Start')){ $Start = $liveDays[0] }
+if(-not $PSBoundParameters.ContainsKey('End'))  { $End   = $todayTpe }
+$days = @($liveDays | Where-Object { $_ -ge $Start.Date -and $_ -le $End.Date })
+if(-not $days){ throw "日期區間無交易日：$($Start.ToShortDateString())..$($End.ToShortDateString())" }
+
+# 全市場池 or 樣板展開
+if ($PSBoundParameters.ContainsKey("IDs")) {
+  $ids = Expand-IDPatterns @($IDs)
+} else {
+  $ids = Get-PoolIDs
+}
+if(-not $ids){ throw "IDs/Pool 為空，無法執行歷史掃描" }
+if(-not $ids){ throw "池表無有效四碼 ID：$POOL" }
+
+# KBar 預設 5 分
+if(-not $env:FINMIND_KBAR_INTERVAL){ $env:FINMIND_KBAR_INTERVAL='5' }
+$env:FINMIND_THROTTLE_RPM = [string]$RPM
+
+$log = 'reports\dateid_extras_history_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss')
+"POOL=$POOL  IDs=$($ids.Count)  DATES=$($days.Count)  BATCH=$Batch  RPM=$RPM  Datasets=$Datasets" | Tee-Object -FilePath $log
+$sets = ($Datasets -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+
+foreach($d in $days){
+  $ds = $d.ToString('yyyy-MM-dd')
+  Write-Host "== [$ds] =="
+  for($i=0; $i -lt $ids.Count; $i+=$Batch){
+    $j = [Math]::Min($i+$Batch-1, $ids.Count-1)
+    $chunk = $ids[$i..$j]
+    try{
+      pwsh -NoProfile -ExecutionPolicy Bypass -File $RUN -Date $ds -IDs ($chunk -join ',') -Datasets ($sets -join ',') -RPM $RPM *>> $log
+    } catch {
+      if($Strict){ throw } else { "[WARN][$ds][$i..$j] $($_.Exception.Message)" | Tee-Object -FilePath $log -Append }
+    }
+    if($SleepMsBetweenBatches -gt 0){ Start-Sleep -Milliseconds $SleepMsBetweenBatches }
+  }
+}
+"Done. Log: $log" | Tee-Object -FilePath $log
+

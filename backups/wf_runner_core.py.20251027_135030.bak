@@ -1,62 +1,4 @@
 from __future__ import annotations
-# --- injected guard: args fallback (v2) ---
-import sys as _sys
-try:
-    args  # noqa: F821
-except NameError:
-    try:
-        import argparse as _argparse
-        _ap = _argparse.ArgumentParser(add_help=False)
-        _ap.add_argument('--dir'); _ap.add_argument('--export'); _ap.add_argument('--root')
-        _ap.add_argument('--config'); _ap.add_argument('--pattern')
-        _ap.add_argument('--runs', nargs='*'); _ap.add_argument('--limit', type=int)
-        _ap.add_argument('--workers', type=int); _ap.add_argument('--dryrun', action='store_true')
-        _ap.add_argument('--verbose', action='store_true')
-        args = _ap.parse_known_args(_sys.argv[1:])[0]
-    except Exception:
-        from types import SimpleNamespace as _NS
-        args = _NS(dir='runs/wf_configs', export='reports', root='.', config=None, pattern=None, runs=None, limit=None, workers=None, dryrun=False, verbose=False)
-globals()['args'] = args
-# --- /injected guard: args fallback (v2) ---
-# --- injected guard: results fallback + atexit exporter (v5) ---
-from pathlib import Path as _P
-import atexit as _atexit, json as _json, os as _os, time as _time
-
-try:
-    results  # noqa: F821
-except NameError:
-    results = None
-
-def _ac_get_results():
-    global results
-    if results is None:
-        results = {"runs": [], "meta": {"mode": "core-fallback", "note": "auto-filled due to missing results"}}
-    return results
-
-def _ac_export_path():
-    # write ONLY to _runner_results.json to avoid clobbering gate_summary.json
-    _default = _P.cwd() / "reports" / "_runner_results.json"
-    _env = _os.getenv("AC_RUNNER_RESULTS", None)
-    try:
-        return _P(_env) if _env else _default
-    except Exception:
-        return _default
-
-def _ac_export():
-    try:
-        _p = _ac_export_path()
-        _p.parent.mkdir(parents=True, exist_ok=True)
-        _payload = _ac_get_results()
-        _meta = _payload.setdefault("meta", {})
-        _meta.setdefault("exported_at", _time.strftime("%Y-%m-%dT%H:%M:%S"))
-        if "mode" not in _meta:
-            _meta["mode"] = "core-fallback"
-        _p.write_text(_json.dumps(_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-
-_atexit.register(_ac_export)
-# --- /injected guard ---
 import sys, pathlib, argparse, json
 import pandas as pd
 import yaml
@@ -152,10 +94,4 @@ sys.exit(0 if ok_all else 2)
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
 
