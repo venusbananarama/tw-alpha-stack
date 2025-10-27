@@ -80,3 +80,9 @@ tools/_archive/
 AlphaCity_code_*.zip
 AlphaCity_handover_*.zip
 *.zip.sha256.txt
+
+# do not track backup snapshots
+backups/
+*.bak
+*.bak_*
+

@@ -1,7 +1,0 @@
-if ($env:ALPHACITY_ALLOW -ne '1') { Write-Error 'ALPHACITY_ALLOW=1 not set.' -ErrorAction Stop }
-param([Parameter(ValueFromRemainingArguments=$true)] $Args)
-# 從 tools\gate\tools\ 回到根層 tools\
-$toolsRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-$target    = Join-Path $toolsRoot 'Run-SmokeTests.ps1'
-if(-not (Test-Path $target)){ throw "Bridge target missing: $target" }
-& pwsh -NoProfile -ExecutionPolicy Bypass -File $target @Args
