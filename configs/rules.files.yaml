@@ -1,0 +1,20 @@
+files:
+  must_exist:
+    - rules.yaml
+    - configs/universe.yaml
+    - configs/investable_universe.txt
+    - datahub/silver/alpha/prices
+    - reports
+freshness_days_allowed:
+  prices:   2
+  chip:     2
+  dividend: 60
+  per:      365
+calendar:
+  anchor_expected: W-FRI
+  tz_expected: Asia/Taipei
+evidence_chain:
+  - reports/preflight_report.json
+  - reports/gate_summary.json
+  - configs/investable_universe.txt
+  - run_manifest.json

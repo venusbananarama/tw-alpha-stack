@@ -1,4 +1,15 @@
 {
-  "ssot_hash": "9a4085017a7b3c2a42b0cd47f04d08dbc5ee2dea9373b6813bd474bddd646360",
-  "schema_ver": "2025_09_29"
+  "schema_ver": "2025_09_29",
+  "ssot_hash": "C80BD677AFA3928C46370F2E217A776FF3488E69BE26438A084A2000955AB9AB",
+  "data_ver": "2025_10_27",
+  "model_id": "v4x_p1p4_r1",
+  "wf_windows": [
+    6,
+    12,
+    24
+  ],
+  "reports": [
+    "reports/preflight_report.json",
+    "reports/gate_summary.json"
+  ]
 }

@@ -1,117 +1,34 @@
-calendar:
-  weekly_anchor: W-FRI
-  timezone: Asia/Taipei
-delays:
-  chip: T+1
-  fundamentals: T+1
-  events: T+1
-paths:
-  prices: datahub/silver/alpha/prices
-  chip: datahub/silver/alpha/chip
-  dividend: datahub/silver/alpha/dividend
-  per: datahub/silver/alpha/per
 validation:
-  dsr_min_after_costs: 0.0
-  psr_min: 0.9
-  t_min: 2
-alpha_quality:
-  rank_ic_weekly_min: 0.03
-orthogonalization:
-  corr_abs_max: 0.7
-costs:
-  fees_bps: 10
-  tax_bps: 30
-  slip_bps: 10
-constraints:
-  max_weight_per_symbol: 0.05
-  max_daily_participation: 0.05
-execution:
-  protect_limit_orders: true
-  auction:
-    enable_open_close: true
-    max_participation: 0.1
-  pov_enabled: true
-  pov: 0.05
-  limit_protect:
-    atr_mul: 2.0
-universe:
-  allowed_suffixes:
-  - .TW
-  - .TWO
-  drop_empty: true
-benchmark:
-  symbol: 0050.TW
-gates:
-  wf_pass_min: 0.8
-  participation_max: 0.05
-  leakage_corr_sameweek_max: 0.2
+  alpha_quality:
+    rank_ic_weekly_min: 0.03
+    psr_min: 0.9
+    t_stat_min: 2.0
+    dsr_min_after_costs: 0.0
+  walk_forward:
+    wf_pass_min: 0.80
+    windows: [6, 12, 24]        # months
+  turnover:
+    annual_max: 500.0
+  risk:
+    max_drawdown_pct: 20.0
+    vol_target_pct: [10.0, 12.0]
+    weight_single_name_max_pct: 5.0
+    adv_participation_max_pct: 5.0
+  costs_exec:
+    replay_mae_bps_max: 2.0
+    slip_model: default_v1
+  leverage:
+    leverage_cap: 1.3
+    enable_only_if_maxdd_in_leq_pct: 15.0
+  regime:
+    required: [trend_up, vol_up, liq_up]
+
 live_controls:
-  killswitch_drawdown_1: -0.1
-  killswitch_drawdown_2: -0.15
   killswitch:
-    dd_soft: -0.1
-    dd_hard: -0.15
-execution_checks:
-  replay_mae_bps_max: 2
-portfolio:
-  position:
-    max_weight: 0.05
-  liquidity:
-    max_adv_part: 0.05
-  industry_neutral: true
-deep:
-  uncertainty_output:
-  - p05
-  - p50
-  - p95
+    drawdown_soft_pct: -10.0
+    drawdown_hard_pct: -15.0
+
 ssot:
-  wf_pass_min: 0.8
-  leverage_cap: 1.3
-# === AlphaCity mini-run additions (append-only) ===
-preflight:
-  expect_date_source: calendar        # 由 calendar 推導期望日
-  freshness_guard:
-    prices: T+0
-    chip:   T+1
-    dividend: T+999                   # 先放寬，避免拖累
-    per:      T+999
-  # 小樣本允許以覆蓋率過關（只要有回補到 1% 就視為可接受）
-  min_coverage_ratio:
-    prices: 0.01
-    chip:   0.01
-  # 限縮掃描分割，加速小測（全量時請移除或改成實際分割）
-  scan_partitions:
-    - "yyyymm=202510"
-
-universe:
-  source: file
-  file: configs/investable_universe.txt
-  format: lines
-  allow_dup: false
-  allow_missing: false
-
-gates:
-  dev_mode: true                      # 小樣本驗證先開；全量完成後改為 false
-  require_datasets:
-    - prices
-    - chip
-  freshness_requirements:
-    prices: T+0
-    chip:   T+1
-  coverage_threshold:                 # 只在 dev_mode=true 時生效
-    prices: 0.01
-    chip:   0.01
-
-reporting:
-  root_hint: "."
-  export_dir: reports
-# === End mini-run additions ===
-validation:
-  alpha_quality: {rank_ic_weekly_min: 0.03, psr_min: 0.9, t_stat_min: 2.0, dsr_min_after_costs: 0.0}
-  walk_forward:  {wf_pass_min: 0.80, windows: [6, 12, 24]}
-  turnover:      {annual_max: 500.0}
-  risk:          {max_drawdown_pct: 20.0, vol_target_pct: [10.0, 12.0], weight_single_name_max_pct: 5.0, adv_participation_max_pct: 5.0}
-  costs_exec:    {replay_mae_bps_max: 2.0}
-live_controls:
-  killswitch:    {drawdown_soft_pct: -10.0, drawdown_hard_pct: -15.0}
-ssot:            {schema_ver: 2025_09_29, week_anchor: W-FRI, tz: Asia/Taipei}
+  schema_ver: 2025_09_29
+  week_anchor: W-FRI
+  tz: Asia/Taipei
