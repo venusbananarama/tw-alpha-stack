@@ -1,23 +1,21 @@
-#requires -Version 7.0
-Set-StrictMode -Version Latest
-$ErrorActionPreference = "Stop"
-
-$root = Split-Path -Parent $MyInvocation.MyCommand.Path | Split-Path -Parent
-Set-Location $root
-
-# Setup env (if helper exists)
-$env:ALPHACITY_ALLOW = "1"
-Remove-Item Env:PYTHONSTARTUP -ErrorAction SilentlyContinue
-if (Test-Path "$PSScriptRoot\Set-AlphaCity-Env.ps1") { . "$PSScriptRoot\Set-AlphaCity-Env.ps1" }
-
-# Prefer existing orchestrator if available (keeps your project semantics intact)
-$orchestrator = Join-Path $PSScriptRoot "Run-DailyBackfill.ps1"
-if (Test-Path $orchestrator) {
-  & pwsh -NoProfile -ExecutionPolicy Bypass -File $orchestrator -Phase prices
-  exit $LASTEXITCODE
+#requires -Version 7
+[CmdletBinding(PositionalBinding=$false)]
+param(
+  [Parameter(Mandatory)][string]$Start,
+  [Parameter(Mandatory)][string]$End,
+  [string]$UniverseFile = '.\configs\investable_universe.txt',
+  [double]$Qps,
+  [int]$BatchSize,
+  [int]$MaxConcurrency,
+  [int]$MaxRetries,
+  [int]$RetryDelaySec
+)
+Set-StrictMode -Version Latest; $ErrorActionPreference='Stop'
+switch ('prices') {
+  'prices' { $DoPrices=$true;  $DoChip=$false; $DoDividend=$false; $DoPER=$false }
+  'chip'   { $DoPrices=$false; $DoChip=$true;  $DoDividend=$false; $DoPER=$false }
 }
-
-# Minimal fallback: call your Python finmind backfill (no args -> project defaults)
-$py = Join-Path $root ".venv\Scripts\python.exe"
-& $py -S "scripts\finmind_backfill.py"
-exit $LASTEXITCODE
+$extra = @{}; foreach($k in 'Qps','BatchSize','MaxConcurrency','MaxRetries','RetryDelaySec'){
+  if($PSBoundParameters.ContainsKey($k)){ $extra[$k] = $PSBoundParameters[$k] }
+}
+. .\tools\daily\Backfill-RatePlan.fast.ps1 -Start $Start -End $End -UniverseFile $UniverseFile @extra

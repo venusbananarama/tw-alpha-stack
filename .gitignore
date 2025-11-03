@@ -90,3 +90,9 @@ backups/
 # quarantine & duplicates
 tools/_quarantine/
 
+# --- ai: backup & quarantine ignore (idempotent) ---
+.bak/
+*.bak
+*.bak_*
+*.__pre_*
+# -----------------------------------------------

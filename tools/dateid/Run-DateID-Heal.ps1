@@ -1,25 +1,53 @@
-param(
-  [string]$UniversePath=".\\configs\\derived\\universe_ids_only.txt",
-  [int]$BatchSize=50,
-  [int]$LookbackDays=7
-)
-$ROOT=Resolve-Path "$PSScriptRoot\\.."; Set-Location $ROOT
-if(-not $env:FINMIND_THROTTLE_RPM){ $env:FINMIND_THROTTLE_RPM='6' }
-if(-not $env:FINMIND_KBAR_INTERVAL){ $env:FINMIND_KBAR_INTERVAL='5' }
+# Auto-generated wrapper: DO NOT EDIT
+#requires -Version 5.1
+[CmdletBinding()]
+param([Parameter(ValueFromRemainingArguments=$true)][object[]]$ArgList = @())
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$global:LASTEXITCODE = 0
 
-$all=Get-Content $UniversePath | Where-Object { $_ -match '^\d{4}$' }
-if(-not $all){ throw "Universe empty: $UniversePath" }
+# Robust argv parsing:
+# - Rebuild named args; accumulate *all contiguous values* after a -Name into an array
+# - Support repeated -Name usage (flatten arrays)
+# - Switch (no value) => $true
+# - Support `--` to stop parsing (rest are positional)
+$named = @{}
+$pos   = @()
+for ($i=0; $i -lt $ArgList.Count; $i++) {
+  $tok = $ArgList[$i]
+  if ($tok -is [string] -and $tok -eq '--') {
+    if ($i+1 -lt $ArgList.Count) { $pos += $ArgList[($i+1)..($ArgList.Count-1)] }
+    break
+  }
+  if ($tok -is [string] -and $tok.StartsWith('-')) {
+    $name = $tok.TrimStart('-')
+    $vals = @()
+    while ($i+1 -lt $ArgList.Count) {
+      $next = $ArgList[$i+1]
+      if (($next -is [string]) -and $next.StartsWith('-')) { break }
+      $vals += $next
+      $i++
+    }
+    $val = if ($vals.Count -eq 0) { $true } elseif ($vals.Count -eq 1) { $vals[0] } else { $vals }
 
-$today=(Get-Date).Date
-$start=$today.AddDays(-[Math]::Max(1,$LookbackDays))
-for($d=$start; $d -lt $today; $d=$d.AddDays(1)){
-  $s=$d.ToString('yyyy-MM-dd'); $e=$d.AddDays(1).ToString('yyyy-MM-dd')
-  Write-Host ("♻ Heal A: {0}→{1}" -f $s,$e)
-  for($j=0; $j -lt $all.Count; $j+=$BatchSize){
-    $slice=$all[$j..([Math]::Min($j+$BatchSize-1,$all.Count-1))]
-    $ids=($slice -join ',')
-    pwsh -NoProfile -ExecutionPolicy Bypass -File .\tools\Run-DateID-Extras.ps1 -Start $s -End $e -IDs $ids -Group A
-    Start-Sleep -Seconds 1
+    if ($named.ContainsKey($name)) {
+      $prev = $named[$name]
+      if ($prev -is [System.Collections.IList] -and -not ($prev -is [string])) {
+        if ($val -is [System.Collections.IList] -and -not ($val -is [string])) { foreach ($v in $val) { [void]$prev.Add($v) } }
+        else { [void]$prev.Add($val) }
+        $named[$name] = $prev
+      } else {
+        if ($val -is [System.Collections.IList] -and -not ($val -is [string])) { $named[$name] = @($prev) + $val }
+        else { $named[$name] = @($prev, $val) }
+      }
+    } else {
+      $named[$name] = $val
+    }
+  } else {
+    $pos += $tok
   }
 }
-"✅ Heal done (lookback=$LookbackDays)"
+$target = Join-Path -Path $PSScriptRoot -ChildPath 'Run-DateID-Extras.ps1'
+if(-not(Test-Path -LiteralPath $target)){ throw "Target not found: $target" }
+& $target @named @pos
+$code=$LASTEXITCODE; if($null -eq $code){$code=0}; exit ([int]$code)

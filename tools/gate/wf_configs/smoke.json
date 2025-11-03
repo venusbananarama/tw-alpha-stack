@@ -1,0 +1,47 @@
+{
+  "id": "SMOKE_TOP30",
+  "symbols": [
+    "0050.TW",
+    "0051.TW",
+    "0052.TW",
+    "0053.TW",
+    "0054.TW",
+    "0055.TW",
+    "0056.TW",
+    "0057.TW",
+    "0058.TW",
+    "0059.TW",
+    "0060.TW",
+    "0061.TW",
+    "0080.TW",
+    "0081.TW",
+    "1101.TW",
+    "1102.TW",
+    "1103.TW",
+    "1104.TW",
+    "1107.TW",
+    "1108.TW",
+    "1109.TW",
+    "1110.TW",
+    "1201.TW",
+    "1203.TW",
+    "1210.TW",
+    "1213.TW",
+    "1215.TW",
+    "1216.TW",
+    "1217.TW",
+    "1218.TW"
+  ],
+  "universe_file": "C:\\AI\\tw-alpha-stack\\configs\\investable_universe.txt",
+  "start": "2025-09-30",
+  "end": "2025-10-20",
+  "windows": [
+    6,
+    12
+  ],
+  "rebalance": "1W",
+  "costs": {
+    "tax_pct": 30,
+    "fees_bps": 25
+  }
+}

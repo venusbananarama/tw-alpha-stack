@@ -1,0 +1,11 @@
+{
+  "meta": { "name": "AC-Gate", "version": "4X-Delta-2025.11", "timezone": "Asia/Taipei" },
+  "outputs": { "reports_dir": "reports", "gate_summary_file": "gate_summary.json" },
+  "wf": { "windows": [6, 12, 24], "oos_months": 12, "require_artifacts": true },
+  "rules": {
+    "validation": { "psr_min": 0.9, "t_stat_min": 2.0, "dsr_after_costs_min": 0.0, "turnover_max_pa": 500, "replay_mae_bps_max": 2.0 },
+    "wf_pass_min": 0.8
+  },
+  "freshness": { "expected_trading_day_offset": 0, "allow_stale_days": 0 },
+  "behavior": { "allow_fallback_from_wf_gate_summary": false, "emit_placeholder_when_missing": true, "placeholder_overall": "FAIL" }
+}

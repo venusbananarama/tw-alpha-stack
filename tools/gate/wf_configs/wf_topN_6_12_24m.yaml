@@ -1,0 +1,13 @@
+name: wf_topN_6_12_24m
+mode: wf
+walk_forward:
+  windows: [6, 12, 24]
+  oos_months: 12
+strategy:
+  id: longonly_topN
+  params: { topN: 20, rebalance: Weekly, cost_bps: 10, tax_bps: 30 }
+data:
+  universe_file: configs/investable_universe.txt
+  datahub_root: datahub
+rules_file: rules.yaml
+export_dir: reports

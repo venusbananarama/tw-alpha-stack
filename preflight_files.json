@@ -1,10 +1,21 @@
 {
-  "calendar": { "anchor": "W-FRI", "tz": "Asia/Taipei" },
+  "calendar": {
+    "anchor": "W-FRI",
+    "tz": "Asia/Taipei"
+  },
   "freshness": {
-    "prices":   { "max_lag_days": 2 },
-    "chip":     { "max_lag_days": 2 },
-    "dividend": { "max_lag_days": 60 },
-    "per":      { "max_lag_days": 365 }
+    "prices": {
+      "max_lag_days": 2
+    },
+    "chip": {
+      "max_lag_days": 2
+    },
+    "dividend": {
+      "max_lag_days": 120
+    },
+    "per": {
+      "max_lag_days": 365
+    }
   },
   "fail_on_schema": true
 }

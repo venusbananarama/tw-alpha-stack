@@ -1,29 +1,53 @@
-# tools/Launch-DateID.ps1
-# 作用：在「當前工作階段」自動設 Process-scope Bypass + Unblock，再轉呼叫 Run-DateID.ps1
-# 用法範例：
-# pwsh -NoProfile -ExecutionPolicy Bypass -File .\tools\Launch-DateID.ps1 -Date '2025-10-06' -IDs '2330,2317,2303' -Datasets all
-# 或（已在當前視窗）：
-# .\tools\Launch-DateID.ps1 -Date '2025-10-06' -IDs '2330,2317,2303' -Datasets all
-
-[CmdletBinding(SupportsShouldProcess=$true)]
-param(
-  [Parameter(Mandatory=$true)][string]$Date,
-  [Parameter(Mandatory=$true)][string]$IDs,
-  [ValidateSet('prices','chip','dividend','per','all')][string]$Datasets='all',
-  [string]$Root='.',
-  [string]$DataHubRoot='datahub',
-  [switch]$NoLog
-)
-
+# Auto-generated wrapper: DO NOT EDIT
+#requires -Version 5.1
+[CmdletBinding()]
+param([Parameter(ValueFromRemainingArguments=$true)][object[]]$ArgList = @())
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$global:LASTEXITCODE = 0
 
-# 1) 當前程序層級允許腳本
-try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force } catch { }
+# Robust argv parsing:
+# - Rebuild named args; accumulate *all contiguous values* after a -Name into an array
+# - Support repeated -Name usage (flatten arrays)
+# - Switch (no value) => $true
+# - Support `--` to stop parsing (rest are positional)
+$named = @{}
+$pos   = @()
+for ($i=0; $i -lt $ArgList.Count; $i++) {
+  $tok = $ArgList[$i]
+  if ($tok -is [string] -and $tok -eq '--') {
+    if ($i+1 -lt $ArgList.Count) { $pos += $ArgList[($i+1)..($ArgList.Count-1)] }
+    break
+  }
+  if ($tok -is [string] -and $tok.StartsWith('-')) {
+    $name = $tok.TrimStart('-')
+    $vals = @()
+    while ($i+1 -lt $ArgList.Count) {
+      $next = $ArgList[$i+1]
+      if (($next -is [string]) -and $next.StartsWith('-')) { break }
+      $vals += $next
+      $i++
+    }
+    $val = if ($vals.Count -eq 0) { $true } elseif ($vals.Count -eq 1) { $vals[0] } else { $vals }
 
-# 2) 解鎖檔案（若有 MOTW）
-$rd = Join-Path $PSScriptRoot 'Run-DateID.ps1'
-if (Test-Path $rd) { try { Unblock-File $rd } catch { } }
-
-# 3) 轉呼叫 Run-DateID.ps1（參數直接傳遞）
-& $rd -Date $Date -IDs $IDs -Datasets $Datasets -Root $Root -DataHubRoot $DataHubRoot -NoLog:$NoLog
+    if ($named.ContainsKey($name)) {
+      $prev = $named[$name]
+      if ($prev -is [System.Collections.IList] -and -not ($prev -is [string])) {
+        if ($val -is [System.Collections.IList] -and -not ($val -is [string])) { foreach ($v in $val) { [void]$prev.Add($v) } }
+        else { [void]$prev.Add($val) }
+        $named[$name] = $prev
+      } else {
+        if ($val -is [System.Collections.IList] -and -not ($val -is [string])) { $named[$name] = @($prev) + $val }
+        else { $named[$name] = @($prev, $val) }
+      }
+    } else {
+      $named[$name] = $val
+    }
+  } else {
+    $pos += $tok
+  }
+}
+$target = Join-Path -Path $PSScriptRoot -ChildPath 'Run-DateID.ps1'
+if(-not(Test-Path -LiteralPath $target)){ throw "Target not found: $target" }
+& $target @named @pos
+$code=$LASTEXITCODE; if($null -eq $code){$code=0}; exit ([int]$code)

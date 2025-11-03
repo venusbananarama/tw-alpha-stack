@@ -1,25 +1,54 @@
-﻿#requires -Version 7
+# Auto-generated wrapper: DO NOT EDIT
+#requires -Version 5.1
+[CmdletBinding()]
+param([Parameter(ValueFromRemainingArguments=$true)][object[]]$ArgList = @())
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$global:LASTEXITCODE = 0
 
-if ($env:ALPHACITY_ALLOW -ne '1') { Write-Error 'ALPHACITY_ALLOW=1 not set.' -ErrorAction Stop }
-$anc = @(
-  (Split-Path $PSScriptRoot -Parent),
-  (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent),
-  (Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent)
-) | Where-Object { $_ -and (Test-Path (Join-Path $_ 'tools')) }
-$repo = $anc | Select-Object -First 1
-if(-not $repo){ throw ("Bridge cannot locate repo root from: " + $PSScriptRoot) }
-$cands = @(
-  (Join-Path $repo 'tools\fullmarket\Run-FullMarket-DateID-MaxRange.ps1'),
-  (Join-Path $repo 'tools\Run-FullMarket-DateID-MaxRange.ps1'),
-  (Join-Path $repo 'tools\fullmarket\Run-FullMarket-DateID-MaxRate.ps1'),
-  (Join-Path $repo 'tools\Run-FullMarket-DateID-MaxRate.ps1'),
-  (Join-Path $repo 'tools\fullmarket\Run-FullMarket-DateIDMaxRate.ps1'),
-  (Join-Path $repo 'tools\Run-FullMarket-DateIDMaxRate.ps1')
-)
-$target = $cands | Where-Object { Test-Path $_ } | Select-Object -First 1
-if(-not $target){
-  $list = ($cands | ForEach-Object { "  - $_" }) -join "`n"
-  throw ("Bridge target missing, checked:`n{0}" -f $list)
+# Robust argv parsing:
+# - Rebuild named args; accumulate *all contiguous values* after a -Name into an array
+# - Support repeated -Name usage (flatten arrays)
+# - Switch (no value) => $true
+# - Support `--` to stop parsing (rest are positional)
+$named = @{}
+$pos   = @()
+for ($i=0; $i -lt $ArgList.Count; $i++) {
+  $tok = $ArgList[$i]
+  if ($tok -is [string] -and $tok -eq '--') {
+    if ($i+1 -lt $ArgList.Count) { $pos += $ArgList[($i+1)..($ArgList.Count-1)] }
+    break
+  }
+  if ($tok -is [string] -and $tok.StartsWith('-')) {
+    $name = $tok.TrimStart('-')
+    $vals = @()
+    while ($i+1 -lt $ArgList.Count) {
+      $next = $ArgList[$i+1]
+      if (($next -is [string]) -and $next.StartsWith('-')) { break }
+      $vals += $next
+      $i++
+    }
+    $val = if ($vals.Count -eq 0) { $true } elseif ($vals.Count -eq 1) { $vals[0] } else { $vals }
+
+    if ($named.ContainsKey($name)) {
+      $prev = $named[$name]
+      if ($prev -is [System.Collections.IList] -and -not ($prev -is [string])) {
+        if ($val -is [System.Collections.IList] -and -not ($val -is [string])) { foreach ($v in $val) { [void]$prev.Add($v) } }
+        else { [void]$prev.Add($val) }
+        $named[$name] = $prev
+      } else {
+        if ($val -is [System.Collections.IList] -and -not ($val -is [string])) { $named[$name] = @($prev) + $val }
+        else { $named[$name] = @($prev, $val) }
+      }
+    } else {
+      $named[$name] = $val
+    }
+  } else {
+    $pos += $tok
+  }
 }
-& pwsh -NoProfile -ExecutionPolicy Bypass -File $target @args
+$target = Join-Path -Path $PSScriptRoot -ChildPath 'Run-FullMarket-DateID-MaxRange.ps1'
+if(-not(Test-Path -LiteralPath $target)){ throw "Target not found: $target" }
+& $target @named @pos
+$code=$LASTEXITCODE; if($null -eq $code){$code=0}; exit ([int]$code)
 

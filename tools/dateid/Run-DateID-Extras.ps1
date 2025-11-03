@@ -1,130 +1,115 @@
+﻿#requires -Version 7
+<#
+  Run-DateID-Extras.ps1 (AC6 minimal, array-safe)
+  - Single-day × multi-IDs Date-ID fetch for "extra" datasets.
+  - Writes to: datahub\silver\alpha\extra\<Dataset>\yyyymm=*
+  - --end is exclusive; if not given, we use (Date + 1).
+#>
+[CmdletBinding(PositionalBinding=$false)]
 param(
-  [string]$Date,
-  [string]$Start,
-  [string]$End,
-  [string]$IDs,
-  [string]$Group = "A",
-  [int]$ThrottleRPM = [int]([string]::IsNullOrEmpty($env:FINMIND_THROTTLE_RPM) ? 0 : $env:FINMIND_THROTTLE_RPM),
-  [string]$Tag = "A",
-  [switch]$FailOnError
+  [Parameter(Mandatory)][datetime]$Date,
+  [Parameter(Mandatory)][string[]]$IDs,
+  [string]$Datasets = 'TaiwanStockShareholding,TaiwanStockKBar,TaiwanStockMarketValue,TaiwanStockMarketValueWeight,TaiwanStockSplitPrice,TaiwanStockParValueChange,TaiwanStockCapitalReductionReferencePrice,TaiwanStockDelisting',
+  [ValidateRange(6,120)][int]$RPM = 10,
+  [ValidateRange(1,2000)][int]$Batch = 300,
+  [string]$DataRoot = 'datahub',
+  [datetime]$End
 )
 
+Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
-Set-Location (Split-Path -Parent $PSScriptRoot)
 
-function TS { Get-Date -Format "yyyy-MM-dd HH:mm:ss" }
-function Log([string]$type,[string]$msg){
-  $line = "[{0}] {1} {2}" -f (TS), $type, $msg
-  $line | Tee-Object -FilePath $script:LogFile -Append | Out-Host
-}
+# Root & Python
+$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+Set-Location $root
+if(-not $env:ALPHACITY_ALLOW){ $env:ALPHACITY_ALLOW='1' }
+Remove-Item Env:PYTHONSTARTUP -ErrorAction SilentlyContinue | Out-Null
+$PY = '.\.venv\Scripts\python.exe'
+if(-not (Test-Path $PY)){ throw ("Missing {0} (create venv & install requirements)" -f $PY) }
+if([string]::IsNullOrWhiteSpace($env:FINMIND_TOKEN)){ throw "FINMIND_TOKEN not set" }
+if(-not $env:FINMIND_KBAR_INTERVAL){ $env:FINMIND_KBAR_INTERVAL='5' }
 
-# --- 時間窗（--end 半開） ---
-if($Date){
-  $from=[datetime]$Date; $to=$from.AddDays(1)
-}elseif($Start){
-  $from=[datetime]$Start
-  $to = if([string]::IsNullOrEmpty($End)){ $from.AddDays(1) } else { [datetime]$End }
-}else{
-  throw "必須提供 -Date 或 -Start [-End]"
-}
-
-# --- IDs 解析：-IDs > groups\A.txt > investable_universe.txt ---
-$ids=@()
-if($IDs){ $ids = $IDs -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } }
-elseif(Test-Path ".\configs\groups\$Group.txt"){ $ids = Get-Content ".\configs\groups\$Group.txt" | Where-Object { $_.Trim() } }
-elseif(Test-Path ".\configs\investable_universe.txt"){ $ids = Get-Content ".\configs\investable_universe.txt" | Where-Object { $_.Trim() } }
-if(-not $ids -or $ids.Count -eq 0){ throw "找不到可用 IDs（請提供 -IDs 或準備 configs\groups\$Group.txt）" }
-
-# --- Log 檔 ---
-$tagPart = if([string]::IsNullOrEmpty($Tag)){"A"} else {$Tag}
-$script:LogFile = ".\reports\dateid_extras_{0}_{1}.log" -f ($from.ToString('yyyyMMdd')),$tagPart
-"[{0}] === {1} → {2} === IDs={3}" -f (TS),$from.ToString('yyyy-MM-dd'),$to.ToString('yyyy-MM-dd'),(($ids -join ',').Substring(0,[Math]::Min(80,($ids -join ',').Length))) | Tee-Object -FilePath $script:LogFile -Append | Out-Host
-
-# --- API base ---
-$ApiBase = if([string]::IsNullOrEmpty($env:FINMIND_API_BASE)) { "https://api.finmindtrade.com/api/v4/data" } else { $env:FINMIND_API_BASE }
-$Token   = $env:FINMIND_TOKEN
-
-# 資料集：KBar 可能 400，必要時 fallback 到 TaiwanStockPrice
-$Datasets = @(
-  'TaiwanStockKBar',
-  'TaiwanStockShareholding',
-  'TaiwanStockMarketValue',
-  'TaiwanStockMarketValueWeight',
-  'TaiwanStockSplitPrice',
-  'TaiwanStockParValueChange',
-  'TaiwanStockDelisting',
-  'TaiwanStockCapitalReductionReferencePrice'
-)
-$Fallback = @{ 'TaiwanStockKBar' = 'TaiwanStockPrice' }
-
-# 每次呼叫之間的節流
-$delayMs = if($ThrottleRPM -gt 0){ [int](60000 / [Math]::Max(1,$ThrottleRPM)) } else { 0 }
-
-function Build-Query([string]$ds,[string]$id){
-  # 用 ordered 確保輸出順序穩定
-  $q = [ordered]@{ dataset=$ds; data_id=$id }
-  if($ds -eq 'TaiwanStockKBar'){
-    # K 線多數情況用 start_time / end_time + time_interval
-    $q.start_time   = $from.ToString('yyyy-MM-dd')
-    $q.end_time     = $to.ToString('yyyy-MM-dd')
-    $q.time_interval= 1
-  } else {
-    $q.start_date   = $from.ToString('yyyy-MM-dd')
-    $q.end_date     = $to.ToString('yyyy-MM-dd')
-  }
-  if($Token){ $q.token=$Token }
-  return $q
-}
-
-function Invoke-One([string]$ds,[string]$id){
-  $qs  = Build-Query $ds $id
-  $uri = $ApiBase + '?' + (($qs.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join '&')
-  $tries=0
-  while($true){
-    try{
-      $resp = Invoke-RestMethod -Method Get -Uri $uri -TimeoutSec 60
-      $rows = 0; if($resp -and $resp.data){ $rows = ($resp.data | Measure-Object).Count }
-      Log 'DONE' ("{0}:{1} {2}→{3} total_rows={4}" -f $ds,$id,$from.ToString('yyyy-MM-dd'),$to.ToString('yyyy-MM-dd'),$rows)
-      break
-    }catch{
-      $code   = $_.Exception.Response.StatusCode.value__ 2>$null
-      $detail = $_.Exception.Message
-
-      # 5xx → 重試一次
-      if($code -ge 500 -and $tries -lt 1){
-        $tries++; Start-Sleep -Milliseconds 500; continue
-      }
-
-      # 400 for KBar → fallback 到 TaiwanStockPrice
-      if($code -eq 400 -and $ds -eq 'TaiwanStockKBar' -and $Fallback.ContainsKey($ds)){
-        $alt = $Fallback[$ds]
-        Log 'WARN' ("{0}:{1} 400 → fallback {2}" -f $ds,$id,$alt)
-        $qs2  = Build-Query $alt $id
-        $uri2 = $ApiBase + '?' + (($qs2.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join '&')
-        try{
-          $resp2 = Invoke-RestMethod -Method Get -Uri $uri2 -TimeoutSec 60
-          $rows2 = 0; if($resp2 -and $resp2.data){ $rows2 = ($resp2.data | Measure-Object).Count }
-          Log 'DONE' ("{0}:{1} {2}→{3} total_rows={4}" -f $alt,$id,$from.ToString('yyyy-MM-dd'),$to.ToString('yyyy-MM-dd'),$rows2)
-        }catch{
-          $code2 = $_.Exception.Response.StatusCode.value__ 2>$null
-          $etype2= ($code2 -eq 429) ? '429' : 'FAIL'
-          Log $etype2 ("{0}:{1} {2}→{3} http={4} err={5}" -f $alt,$id,$from.ToString('yyyy-MM-dd'),$to.ToString('yyyy-MM-dd'),$code2,$_.Exception.Message)
-          if($FailOnError){ throw }
-        }
-        break
-      }
-
-      $etype = ($code -eq 429) ? '429' : 'FAIL'
-      Log $etype ("{0}:{1} {2}→{3} http={4} err={5}" -f $ds,$id,$from.ToString('yyyy-MM-dd'),$to.ToString('yyyy-MM-dd'),$code,$detail)
-      if($FailOnError){ throw }
-      break
+# ===== Helpers: pool & pattern expansion (ALL / 23XXX / 23*) =====
+function Get-PoolIDs {
+  $candidates = @(
+    '.\configs\investable_universe.txt',
+    '.\configs\universe.tw_all.txt', '.\configs\universe.tw_all',
+    '.\configs\groups\ALL', '.\configs\groups\ALL.txt',
+    '.\universe\universe.tw_all.txt', '.\universe\tw_all.txt', '.\universe\all.txt'
+  )
+  foreach($p in $candidates){
+    if(Test-Path $p){
+      [string[]]$ids = @( Get-Content -LiteralPath $p | ForEach-Object {
+        if($_ -match '^\s*(\d{4})(?:\.TW)?\b'){ $matches[1] }
+      } | Sort-Object -Unique )
+      if($ids.Length -gt 0){ return $ids }
     }
   }
+  throw ("no valid pool file; tried: {0}" -f ($candidates -join ', '))
 }
 
-foreach($id in $ids){
-  foreach($ds in $Datasets){
-    Invoke-One $ds $id
-    if($delayMs -gt 0){ Start-Sleep -Milliseconds $delayMs }
+function Convert-TokenToLike4([string]$token){
+  $t = ($token -replace '\.TW$','').Trim()
+  if($t -match '^(ALL|TSE)$'){ return '????' }
+  $like = ''
+  foreach($ch in $t.ToCharArray()){
+    if($like.Length -ge 4){ break }
+    switch -Regex ($ch){
+      '^\d$'     { $like += $ch; break }
+      '^[Xx\?]$' { $like += '?'; break }
+      '^\*$'     { while($like.Length -lt 4){ $like += '?' }; break }
+      default    { break }
+    }
   }
+  while($like.Length -lt 4){ $like += '?' }
+  return $like
 }
+
+function Expand-IDPatterns([string[]]$IDs){
+  [string[]]$pool = Get-PoolIDs
+  $set = New-Object System.Collections.Generic.HashSet[string]
+  foreach($tok in @($IDs)){
+    $parts = @(); if($tok -is [string] -and $tok -match ','){ $parts = $tok.Split(',') } else { $parts = @($tok) }
+    foreach($raw in $parts){
+      $t = ($raw -replace '\.TW$','').Trim()
+      if(-not $t){ continue }
+      if($t -match '^(ALL|TSE)$'){ foreach($id in $pool){ [void]$set.Add($id) }; continue }
+      if($t -match '^[0-9]{4}$'){ [void]$set.Add($t); continue }
+      $like = Convert-TokenToLike4 $t
+      foreach($id in $pool){ if($id -like $like){ [void]$set.Add($id) } }
+    }
+  }
+  return @($set | Sort-Object)
+}
+
+# Expand IDs → .TW (array-safe)
+[string[]]$expandedIDs = @( Expand-IDPatterns @($IDs) )
+if($expandedIDs.Length -eq 0){ throw "IDs pattern expands to empty set" }
+[string[]]$symbols = $expandedIDs | ForEach-Object { "$_.TW" }
+
+# Window & dataset list (arrays)
+$ds    = $Date.ToString('yyyy-MM-dd')
+$endEx = if($PSBoundParameters.ContainsKey('End')){ ([datetime]$End).ToString('yyyy-MM-dd') } else { ($Date.AddDays(1)).ToString('yyyy-MM-dd') }
+[string[]]$sets = ($Datasets -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+
+# Throttle for the Python-side fetcher
+$env:FINMIND_THROTTLE_RPM = [string]$RPM
+
+Write-Host ("[DateID-Extras] date={0} end_exclusive={1} ids={2} rpm={3} datasets={4}" -f $ds,$endEx,($symbols.Length),$RPM,($sets -join ','))
+
+# Main loop (array slicing guarded)
+$N = $symbols.Length
+for($i=0; $i -lt $N; $i+=$Batch){
+  $j = [Math]::Min($i+$Batch-1, $N-1)
+  if($j -lt $i){ break }
+  [string[]]$chunk = @($symbols[$i..$j])
+  $idsArg = ($chunk -join ',')
+  foreach($d in $sets){
+    & $PY .\scripts\fm_dateid_fetch.py `
+      --datasets $d --ids $idsArg `
+      --date $ds --end $endEx `
+      --out-root $DataRoot
+  }
+  if($i -lt ($N-1)){ Start-Sleep -Milliseconds 500 }
+}
+Write-Host "Done (extras)."
