@@ -96,3 +96,5 @@ tools/_quarantine/
 *.bak_*
 *.__pre_*
 # -----------------------------------------------
+# --- ai: widen backup ignore ---
+*.bak*
