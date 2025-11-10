@@ -105,3 +105,27 @@ tools/_quarantine/
 tools/_archive*/
 **/_archive*/
 # -----------------------------------------------
+# ---- noise / backups / one-off fixes ----
+# archive 資料夾
+_archive*/
+**/_archive*/
+
+# 備份/熱修/臨時檔
+*.bak
+*.bak?
+*.bak_*
+*.bak2
+*.bak2_*
+*.hotfix_*
+*.fix_*
+*.pre_*
+*.new
+*.old
+*.tmp
+*.log
+
+# 可選：通用 IDE/OS 雜檔
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
