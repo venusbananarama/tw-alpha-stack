@@ -1,0 +1,36 @@
+meta:
+  profile: phase2
+  align_to: W-FRI
+  lag_rule: {{ D: "T+1 close", W: "W-FRI close" }}
+  cost_model: {{ fee_bps: 8, tax_bps: 30, slip_bps: 10, impact: square_root }}
+  wf_windows: [6, 12, 24]
+  acceptance:
+    rank_ic_min: 0.03
+    corr_abs_max: 0.7
+    wf_pass_rate_min: 0.80
+    guards: {{ psr_min: 0.9, t_min: 2.0, dsr_after_costs_gt: 0, replay_mae_bps_max: 2 }}
+portfolio:
+  topn_default: 20
+  max_weight_pct: 0.05
+  capacity_guards: {{ max_adv_participation_pct: 5, single_name_weight_cap_pct: 5 }}
+
+factors:
+  - name: mtf_macd_reloaded_12_26_9
+    alias: MTF-MACD-R
+    family: tech
+    source: prices
+    freq: W
+    window: {{ fast: 12, slow: 26, signal: 9 }}
+    transform: [winsor_3sigma, zscore_by_date]
+    neutralize: [size, industry]
+    scorer: [rank_ic, ic_t, turnover, capacity, after_costs]
+    enabled: true
+  - name: chip_foreign_netbuy_5d
+    family: chip
+    source: chip
+    freq: W
+    window: {{ span_d: 5 }}
+    transform: [winsor_3sigma, zscore_by_date]
+    neutralize: [size]
+    scorer: [rank_ic, turnover, capacity]
+    enabled: true

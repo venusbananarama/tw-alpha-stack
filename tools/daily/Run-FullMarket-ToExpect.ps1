@@ -1,129 +1,112 @@
 #requires -Version 7
 [CmdletBinding(PositionalBinding=$false)]
 param(
-  [string]$Start = '2000-01-01',
-  [string]$End,                                  # 若未給，讀 preflight 的 expect_date*
-  [string[]]$Tables = @('prices','chip','dividend','per'),
-  [string]$UniverseFile = '.\configs\investable_universe.txt',
-  [double]$Qps,
-  [int]$LimitDays = 0,
-  [switch]$DryRun
+  [Parameter(Mandatory)][string]$Start,      # 例：'2025-11-05'
+  [Parameter(Mandatory)][string]$End,        # 半開：設 '2025-11-06' 才吃到 11/05
+  [ValidateSet('prices','chip','per','all')]
+  [string]$Dataset = 'all',
+
+  [switch]$SkipIfOk = $true,                 # 有 .ok 就跳過
+  [string]$CheckpointRoot = ".\_state\ingest", # ← 只寫 ingest，不碰 mainline
+  [string]$RootPath = "C:\AI\tw-alpha-stack",
+  [string]$UniversePath = ".\configs\investable_universe.txt",
+  [int]$BatchSize = 80
 )
-Set-StrictMode -Version Latest; $ErrorActionPreference='Stop'
 
-Import-Module .\tools\daily\AC.Checkpoint.psm1 -Force  # 輕量 checkpoint 模組（你已安裝）
+Set-StrictMode -Version Latest
+$ErrorActionPreference='Stop'
+Set-Location $RootPath
 
-# -- 安全取值小工具：不直接用 $obj.guard，避免 StrictMode 在不存在屬性時拋錯
-function Get-JsonProp {
-  param([Parameter(Mandatory)][object]$Object, [Parameter(Mandatory)][string]$Name)
-  if($null -eq $Object){ return $null }
-  $p = $Object.PSObject.Properties[$Name]
-  if($p){ return $p.Value } else { return $null }
+# ---- 基本環境（半開區間 gate + QPS/RPM）----
+$env:EXPECT_DATE_FIXED = $End
+$env:EXPECT_DATE       = $End
+$env:FINMIND_QPS = $env:FINMIND_QPS ?? '1.67'
+$env:FINMIND_RPM = $env:FINMIND_RPM ?? '100'
+
+# ---- Universe 檢查（存在 + 格式）----
+if(!(Test-Path $UniversePath)){ throw "Universe file not found: $UniversePath" }
+$ucnt = (Get-Content $UniversePath | Where-Object { $_ -match '^\d{4,5}(\.TW|\.TWO|[A-Z])?$' }).Count
+if($ucnt -le 0){ throw "Universe is empty: $UniversePath" }
+Write-Host ("Universe count: {0}" -f $ucnt) -ForegroundColor DarkCyan
+
+# ---- OK helpers（僅寫 ingest）----
+function Get-OkPath([string]$ds,[string]$d){
+  Join-Path $CheckpointRoot (Join-Path $ds "$d.ok")
+}
+function Has-Ok([string]$ds,[string]$d){
+  Test-Path (Get-OkPath $ds $d)
+}
+function Write-Ok([string]$ds,[string]$d){
+  $p = Get-OkPath $ds $d
+  New-Item -ItemType Directory -Force -Path (Split-Path $p) | Out-Null
+  "" | Out-File -Encoding ascii -Force $p
+  Write-Host "OK $ds checkpoint: $d @ $CheckpointRoot" -ForegroundColor Green
 }
 
-function Resolve-ExpectDate {
-  param([string]$ReportsDir = '.\reports')
-  $PY=".\.venv\Scripts\python.exe"
-  & $PY .\scripts\preflight_check.py --rules .\rules.yaml --export $ReportsDir --root . | Out-Null
-  $pfPath = Join-Path $ReportsDir 'preflight_report.json'
-  if(!(Test-Path $pfPath)){ throw "Missing $pfPath" }
-  $pfRaw = Get-Content $pfPath -Raw -ErrorAction Stop
-  try { $pf = $pfRaw | ConvertFrom-Json -ErrorAction Stop } catch { $pf = $null }
+# ---- Lock（避免同時重覆跑）----
+function With-Lock([string]$name,[scriptblock]$body){
+  $lock = ".\_state\locks\$name.lock"
+  if(Test-Path $lock){ Write-Warning "Locked: $name（略過）"; return }
+  New-Item -ItemType File -Path $lock -Force | Out-Null
+  try { & $body } finally { Remove-Item $lock -ErrorAction SilentlyContinue }
+}
 
-  $cands = @()
-  if($pf){
-    foreach($k in 'expect_date','expect_date_fixed'){
-      $v = Get-JsonProp -Object $pf -Name $k
-      if($v){ $cands += [string]$v }
-    }
-    $guard = Get-JsonProp -Object $pf -Name 'guard'
-    if($guard){
-      foreach($k in 'expect_date','expect_date_fixed'){
-        $v = Get-JsonProp -Object $guard -Name $k
-        if($v){ $cands += [string]$v }
-      }
-    }
+# ---- 路徑：偏好日級入口，不在則退回 RatePlan ----
+$DailyPrices = ".\tools\daily\Daily-Backfill-Prices.ps1"
+$DailyChip   = ".\tools\daily\Daily-Backfill-Chip.ps1"
+$FullMarket  = ".\tools\daily\Backfill-FullMarket.ps1"
+$RatePlan    = ".\tools\daily\Backfill-RatePlan.ps1"
+
+function Run-Prices {
+  if(Test-Path $DailyPrices){
+    & pwsh -NoProfile -File $DailyPrices -Start $Start -End $End
+  } elseif(Test-Path $RatePlan){
+    $env:BACKFILL_DATASETS='prices'
+    & pwsh -NoProfile -File $RatePlan -Start $Start -End $End
+  } else { throw "找不到 prices 的入口（$DailyPrices / $RatePlan）" }
+}
+
+function Run-Chip {
+  if(Test-Path $DailyChip){
+    & pwsh -NoProfile -File $DailyChip -Start $Start -End $End
+  } elseif(Test-Path $RatePlan){
+    $env:BACKFILL_DATASETS='chip'
+    & pwsh -NoProfile -File $RatePlan -Start $Start -End $End
+  } else { throw "找不到 chip 的入口（$DailyChip / $RatePlan）" }
+}
+
+function Run-PER {
+  # 前置：必須先有 prices / chip 的 .ok（同一日期）
+  $need = @('prices','chip') | Where-Object { -not (Has-Ok $_ $Start) }
+  if($need){ throw "per $Start 前置 .ok 未齊：$($need -join ', ')" }
+
+  if(Test-Path $FullMarket){
+    & pwsh -NoProfile -File $FullMarket -Start $Start -End $End
+  } elseif(Test-Path $RatePlan){
+    # 部分環境 PER 也可由 rateplan 觸發（若支援）
+    $env:BACKFILL_DATASETS='per'
+    & pwsh -NoProfile -File $RatePlan -Start $Start -End $End
+  } else { throw "找不到 PER 聚合器（$FullMarket / $RatePlan）" }
+}
+
+function Run-One([string]$ds,[scriptblock]$invoke){
+  if($SkipIfOk -and (Has-Ok $ds $Start)){
+    Write-Host "skip $ds $Start（已有 .ok）" -ForegroundColor DarkGray
+    return
   }
-  $d = $null
-  foreach($x in $cands){ if(-not [string]::IsNullOrWhiteSpace($x)) { $d = $x; break } }
-
-  if(-not $d){
-    # 最後退回交易日曆（<= 今天 最近一日）
-    if(Test-Path .\cal\trading_days.csv){
-      $today=(Get-Date).Date
-      $last=(Import-Csv .\cal\trading_days.csv | ForEach-Object{ [datetime]::Parse($_.date).Date } |
-             Where-Object { $_ -le $today } | Sort-Object | Select-Object -Last 1)
-      if($last){ $d = $last.ToString('yyyy-MM-dd') }
-    }
-  }
-  if(-not $d){ throw "expect_date missing (preflight_report.json / calendar)" }
-  return $d
-}
-
-# --- 1) 解析 Start/End（End 不含） ---
-try { $s=[datetime]::Parse($Start).Date } catch { throw "Invalid -Start: $Start" }
-if([string]::IsNullOrWhiteSpace($End)){ $End = Resolve-ExpectDate }
-try { $e=[datetime]::Parse($End).Date } catch { throw "Invalid -End: $End" }
-if($e -le $s){ throw "End($End) must be greater than Start($Start). End is exclusive." }
-
-# --- 2) 日期集合（交易日優先；否則逐日） ---
-$days = New-Object System.Collections.Generic.List[datetime]
-$cal = ".\cal\trading_days.csv"
-if(Test-Path $cal){
-  (Import-Csv $cal) | ForEach-Object{
-    $d=[datetime]::Parse($_.date).Date
-    if($d -ge $s -and $d -lt $e){ [void]$days.Add($d) }
-  }
-}else{
-  for($d=$s; $d -lt $e; $d=$d.AddDays(1)){ [void]$days.Add($d) }
-}
-if($LimitDays -gt 0 -and $days.Count -gt $LimitDays){ $days = $days[-$LimitDays..($days.Count-1)] }
-
-# --- 3) Universe 檢查（若缺，退回 derived/IDs-only） ---
-if(!(Test-Path $UniverseFile) -or (Get-Item $UniverseFile).Length -eq 0){
-  $alt = '.\configs\derived\universe_ids_only.txt'
-  if(Test-Path $alt){ $UniverseFile = $alt } else { throw "Universe missing: $UniverseFile" }
-}
-$UNI_LINES = (Get-Content $UniverseFile | ? { $_ -match '^\d{4}$' } | Measure-Object -Line).Lines
-if($UNI_LINES -le 0){ throw "Universe empty: $UniverseFile" }
-
-# --- 4) 標準化 dataset 名稱 ---
-$Tables = @($Tables | ForEach-Object { $_ -split '[,\s]+' } | ? { $_ } | ForEach-Object { $_.ToLower() } | Select-Object -Unique)
-
-# --- 5) 主迴圈：逐日 × 逐資料集（無 .ok 才跑） ---
-$fast = '.\tools\daily\Backfill-RatePlan.fast.ps1'
-if(!(Test-Path $fast)){ throw "Missing $fast" }
-
-$run=0; $skip=0
-foreach($D in $days){
-  $D1 = $D.AddDays(1)
-  foreach($ds in $Tables){
-    if(Test-Checkpoint $ds $D){ $skip++; continue }
-
-    $DoPrices=$false; $DoChip=$false; $DoDividend=$false; $DoPER=$false
-    switch($ds){
-      'prices'   { $DoPrices=$true }
-      'chip'     { $DoChip=$true }
-      'dividend' { $DoDividend=$true }
-      'per'      { $DoPER=$true }
-      default { Write-Warning "Unknown dataset: $ds"; continue }
-    }
-
-    $args = @{ Start=$D.ToString('yyyy-MM-dd'); End=$D1.ToString('yyyy-MM-dd'); UniverseFile=$UniverseFile }
-    if($PSBoundParameters.ContainsKey('Qps')){ $args.Qps = $Qps }
-
-    if($DryRun){ Write-Host ("[DRYRUN] {0} {1}->{2} (U={3})" -f $ds,$args.Start,$args.End,$UniverseFile); continue }
-
-    try{
-      . $fast @args    # dot-source 才讀得到 $DoPrices/$DoChip/$DoDividend/$DoPER
-      New-Checkpoint $ds $D | Out-Null
-      Add-IngestLedger -Dataset $ds -Date $D -Symbols $UNI_LINES -Rows -1 -Qps ([double]($args.Qps?$args.Qps:0)) -Exit 0
-      $run++
-    }catch{
-      Add-IngestLedger -Dataset $ds -Date $D -Symbols $UNI_LINES -Rows -1 -Qps ([double]($args.Qps?$args.Qps:0)) -Exit 1
-      Write-Warning ("[{0}] failed on {1}: {2}" -f $ds,$D.ToString('yyyy-MM-dd'),$_.Exception.Message)
-    }
+  With-Lock "$ds-$Start" {
+    & $invoke
+    Write-Ok $ds $Start
   }
 }
-"Plan done. executed=$run skipped_ok=$skip days=$($days.Count) uni_lines=$UNI_LINES" | Write-Host
 
+switch($Dataset){
+  'prices' { Run-One 'prices' { Run-Prices } }
+  'chip'   { Run-One 'chip'   { Run-Chip   } }
+  'per'    { Run-One 'per'    { Run-PER    } }
+  'all'    {
+    & $PSCommandPath -Start $Start -End $End -Dataset prices -SkipIfOk:$SkipIfOk -CheckpointRoot $CheckpointRoot -RootPath $RootPath -UniversePath $UniversePath
+    & $PSCommandPath -Start $Start -End $End -Dataset chip   -SkipIfOk:$SkipIfOk -CheckpointRoot $CheckpointRoot -RootPath $RootPath -UniversePath $UniversePath
+    & $PSCommandPath -Start $Start -End $End -Dataset per    -SkipIfOk:$SkipIfOk -CheckpointRoot $CheckpointRoot -RootPath $RootPath -UniversePath $UniversePath
+  }
+}

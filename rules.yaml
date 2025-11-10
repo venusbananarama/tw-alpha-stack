@@ -44,3 +44,16 @@ ssot:
   week_anchor: W-FRI
   schema_ver: 2025_09_29
   tz: Asia/Taipei
+
+# BEGIN AUTO FRESHNESS (managed) - do not edit below
+---
+checks:
+  freshness:
+    # 當前 Preflight 採用：max_date >= expect_date 視為 OK
+    operator: ge
+    datasets: [prices, chip, per, dividend]
+    # 支援兩種分區樣式；月份分區會從檔內 date 欄取最大值
+    partition_patterns:
+      - "date=YYYY-MM-DD"
+      - "yyyymm=YYYYMM"
+# END AUTO FRESHNESS (managed)

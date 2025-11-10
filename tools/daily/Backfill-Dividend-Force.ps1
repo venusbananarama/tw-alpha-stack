@@ -1,125 +1,100 @@
+#requires -Version 7
+[CmdletBinding(PositionalBinding = $false)]
 param(
-  [string]$RootPath = 'C:\AI\tw-alpha-stack',
-  [string]$From='',
-  [string]$To=''
+  [Parameter(Mandatory)][string]$Start,
+  [Parameter(Mandatory)][string]$End,
+  [string]$RootPath = "C:\AI\tw-alpha-stack"
 )
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-param(
-  [string]$RootPath = "C:\AI\tw-alpha-stack",
-  [string]$From     = "",   # 預設用 preflight 的 dividend.max_date+1
-  [string]$To       = ""    # 預設用 preflight 的 END(T0+1)
-)
+Set-Location $RootPath
 
-$ErrorActionPreference = 'Stop'
-$env:ALPHACITY_ALLOW = '1'
+# 防遞迴守門
+if ($env:DIVIDEND_FORCE_GUARD -eq '1') { return }
+$env:DIVIDEND_FORCE_GUARD = '1'
 
-# 必要：FINMIND_TOKEN（此腳本會自動設 Bearer 與 Base URL）
-if (-not $env:FINMIND_TOKEN) { throw "FINMIND_TOKEN 未設定。" }
-$env:FINMIND_BEARER   = "Bearer $($env:FINMIND_TOKEN)"
-$env:FINMIND_BASE_URL = 'https://api.finmindtrade.com/api/v4/data'
-$PY = Join-Path $RootPath '.venv\Scripts\python.exe'
-if (-not (Test-Path $PY)) { $PY = (Get-Command python,py -ErrorAction SilentlyContinue | Select-Object -First 1).Source }
+Write-Host "Dividend backfill $Start → $End" -ForegroundColor Cyan
 
-# 取 END(T0+1) 與 dividend 現況
-& $PY "$RootPath\scripts\preflight_check.py" --rules "$RootPath\rules.yaml" --export "$RootPath\reports" --root "$RootPath" | Out-Null
-$pf  = Get-Content "$RootPath\reports\preflight_report.json" -Raw | ConvertFrom-Json
-$END = $pf.meta.expect_date
-$DIV0= ($pf.freshness | ? { $_.dataset -like '*\dividend' }).max_date
-if ([string]::IsNullOrWhiteSpace($From)) {
-  $From = if ($DIV0) { (Get-Date $DIV0).AddDays(1).ToString('yyyy-MM-dd') } else { (Get-Date).AddDays(-180).ToString('yyyy-MM-dd') }
+function Invoke-RatePlan {
+  $rp = ".\tools\daily\Backfill-RatePlan.ps1"
+  if(Test-Path $rp){
+    Write-Host "→ Using RatePlan: $rp" -ForegroundColor DarkCyan
+    $env:BACKFILL_DATASETS = 'dividend'
+    $env:FINMIND_QPS = $env:FINMIND_QPS ?? '1.67'
+    $env:FINMIND_RPM = $env:FINMIND_RPM ?? '100'
+    try{
+      & $rp -Start $Start -End $End -InformationAction Continue -ErrorAction Stop
+      return $true
+    } catch {
+      Write-Warning ("RatePlan failed: " + $_.Exception.Message)
+      return $false
+    }
+  }
+  return $false
 }
-if ([string]::IsNullOrWhiteSpace($To))   { $To   = $END }
 
-Write-Host "Force fallback: date-sweep $From -> $To  (END=$END)"
+function Invoke-PythonDividend {
+  Write-Host "→ Using Python dividend backfill" -ForegroundColor DarkCyan
+  $env:PYTHONUNBUFFERED = '1'
+  $env:FINMIND_QPS = $env:FINMIND_QPS ?? '1.67'
+  $env:FINMIND_RPM = $env:FINMIND_RPM ?? '100'
 
-# 逐日全市場：直連 v4 → RAW/TaiwanStockDividend（ex-date → date）
-$py_fetch = @"
-import os, requests, pandas as pd
-from datetime import datetime, timedelta
-from pathlib import Path
+  $py = @(".\.venv\Scripts\python.exe","python","py -3") | Where-Object { $_ }
+  $script = if(Test-Path ".\scripts\dividend_backfill.py"){ ".\scripts\dividend_backfill.py" }
+            elseif(Test-Path ".\scripts\finmind_backfill.py"){ ".\scripts\finmind_backfill.py" }
+            else { $null }
+  if(-not $script){ return $false }
 
-ROOT   = r"{root}"
-BASE   = os.environ.get("FINMIND_BASE_URL","https://api.finmindtrade.com/api/v4/data")
-BEARER = os.environ.get("FINMIND_BEARER")
-assert BEARER, "FINMIND_BEARER missing"
-HDR    = {"Authorization": BEARER}
+  foreach($p in $py){
+    try{
+      $psi = [System.Diagnostics.ProcessStartInfo]::new()
+      $psi.FileName = $p
+      if($script -like "*finmind_backfill.py"){
+        $psi.Arguments = "$script --datasets dividend --start $Start --end $End"
+      } else {
+        $psi.Arguments = "$script --start $Start --end $End"
+      }
+      $psi.UseShellExecute = $false
+      $psi.RedirectStandardOutput = $true
+      $psi.RedirectStandardError  = $true
+      $proc = [System.Diagnostics.Process]::Start($psi)
 
-d1 = datetime.strptime("{d1}", "%Y-%m-%d").date()
-d2 = datetime.strptime("{d2}", "%Y-%m-%d").date()
+      # 120 秒看門狗 + 即時轉印
+      $deadline = (Get-Date).AddSeconds(120)
+      while(-not $proc.HasExited){
+        while($proc.StandardOutput.Peek() -ge 0){ $line=$proc.StandardOutput.ReadLine(); if($line){ Write-Host $line } }
+        while($proc.StandardError.Peek()  -ge 0){ $eline=$proc.StandardError.ReadLine(); if($eline){ Write-Warning $eline } }
+        if((Get-Date) -ge $deadline){
+          Write-Warning "Python dividend 120s 未完成，停止並改走 RatePlan"
+          try{ $proc.Kill($true) } catch {}
+          return $false
+        }
+        Start-Sleep -Milliseconds 200
+      }
+      while(-not $proc.StandardOutput.EndOfStream){ Write-Host ($proc.StandardOutput.ReadLine()) }
+      while(-not $proc.StandardError.EndOfStream ){ Write-Warning ($proc.StandardError.ReadLine()) }
 
-out_root = Path(ROOT, "datahub/raw/finmind/TaiwanStockDividend")
-out_root.mkdir(parents=True, exist_ok=True)
+      return $proc.ExitCode -eq 0
+    } catch {
+      Write-Warning $_.Exception.Message
+    }
+  }
+  return $false
+}
 
-rows = 0
-day  = d1
-while day < d2:
-    sd = day.strftime("%Y-%m-%d")
-    ed = (day + timedelta(days=1)).strftime("%Y-%m-%d")
-    r  = requests.get(BASE, headers=HDR, params={"dataset":"TaiwanStockDividend","start_date":sd,"end_date":ed}, timeout=60)
-    r.raise_for_status()
-    j  = r.json()
-    if j.get("msg")=="success" and j.get("data"):
-        df = pd.DataFrame(j["data"])
-        # ex-date 優先；找不到再退回 date/Date
-        dcol = next((c for c in ["cash_dividend_ex_dividend_date","ex_dividend_date","cash_dividend_ex_date","ex_rights_trading_date","ex_date","date","Date"] if c in df.columns), None)
-        scol = next((c for c in ["symbol","stock_id","code"] if c in df.columns), None)
-        if dcol and scol:
-            df["date"]   = pd.to_datetime(df[dcol], errors="coerce")
-            df["symbol"] = df[scol].astype(str).str.extract(r"(\\d{4})", expand=False)
-            df = df.dropna(subset=["date","symbol"]).sort_values("date").drop_duplicates(subset=["symbol","date"], keep="last")
-            if not df.empty:
-                df["_yyyymm"] = df["date"].dt.strftime("%Y%m")
-                for y, g in df.groupby("_yyyymm"):
-                    out = out_root / f"yyyymm={y}"
-                    out.mkdir(parents=True, exist_ok=True)
-                    g.drop(columns=["_yyyymm"], errors="ignore").to_parquet(out / f"force_{sd}.parquet", index=False)
-                rows += len(df)
-    day += timedelta(days=1)
-print({"written": rows})
-"@
-$py_fetch = $py_fetch.Replace("{root}", $RootPath.Replace("\","/")).Replace("{d1}", $From).Replace("{d2}", $To)
-& $PY -c $py_fetch
+$ran = Invoke-RatePlan
+if(-not $ran){
+  $ran = Invoke-PythonDividend
+  if(-not $ran){ $ran = Invoke-RatePlan }
+}
 
-# 升銀（alias-aware；以 ex-date 映到 date）
-$py_promote = @"
-import os, glob, pandas as pd, shutil
-from pathlib import Path
-ROOT = r"{root}"
-RAW  = Path(ROOT, "datahub/raw/finmind")
-SIL  = Path(ROOT, "datahub/silver/alpha")
-SIL.mkdir(parents=True, exist_ok=True)
-TMP  = Path(SIL, "_div_build_tmp")
-if TMP.exists(): shutil.rmtree(TMP)
-TMP.mkdir(parents=True, exist_ok=True)
-parts=[]; ex_cols=["cash_dividend_ex_dividend_date","ex_dividend_date","cash_dividend_ex_date","ex_rights_trading_date","ex_date","date","Date"]
-for r in [RAW/"dividend", RAW/"TaiwanStockDividend"]:
-    if not r.exists(): continue
-    for f in glob.glob(str(r/"**/*.parquet"), recursive=True):
-        try: df=pd.read_parquet(f)
-        except: continue
-        if df.empty: continue
-        dcol=next((c for c in ex_cols if c in df.columns),None)
-        scol=next((c for c in ["symbol","stock_id","code"] if c in df.columns),None)
-        if not dcol or not scol: continue
-        g=df.copy(); g["date"]=pd.to_datetime(g[dcol],errors="coerce")
-        g["symbol"]=g[scol].astype(str).str.extract(r"(\\d{4})",expand=False)
-        g=g.dropna(subset=["date","symbol"]).sort_values("date").drop_duplicates(subset=["symbol","date"],keep="last")
-        g["_yyyymm"]=g["date"].dt.strftime("%Y%m"); parts.append(g)
-if parts:
-    big=pd.concat(parts,ignore_index=True)
-    for y,gg in big.groupby("_yyyymm"):
-        d=TMP/f"yyyymm={y}"; d.mkdir(parents=True, exist_ok=True)
-        gg.drop(columns=["_yyyymm"],errors="ignore").to_parquet(d/f"dividend_{y}.parquet",index=False)
-    DST=Path(SIL,"dividend")
-    if DST.exists(): shutil.rmtree(DST)
-    TMP.rename(DST)
-print("promoted_div_fallback")
-"@
-$py_promote = $py_promote.Replace("{root}", $RootPath.Replace("\","/"))
-& $PY -c $py_promote
-
-# preflight 驗收
-& $PY "$RootPath\scripts\preflight_check.py" --rules "$RootPath\rules.yaml" --export "$RootPath\reports" --root "$RootPath"
-
+if($ran){
+  $okDir = ".\_state\ingest\dividend"   # ← 僅寫 ingest
+  New-Item -ItemType Directory -Path $okDir -Force | Out-Null
+  "" | Out-File -Encoding ascii -Force (Join-Path $okDir "$Start.ok")
+  Write-Host "OK dividend checkpoint: $Start @ _state\ingest" -ForegroundColor Green
+} else {
+  throw "Dividend backfill 最終仍未成功。"
+}
 
