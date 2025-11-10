@@ -129,3 +129,15 @@ _archive*/
 .idea/
 .DS_Store
 Thumbs.db
+# runtime/state & forensics
+_state/
+_forensics/
+_tmp_log.txt
+
+# local run configs (keep in local, not in repo)
+runs/wf_configs/*.yml
+runs/wf_configs/*.yaml
+runs/wf_configs/*.json
+
+# generated docs (若是產出而非手寫，建議忽略；若要納管就移除此行)
+tools/docs/
