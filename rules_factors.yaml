@@ -1,0 +1,445 @@
+# C:\AI\tw-alpha-stack\rules_factors.yaml
+# ============================================================================
+# Phase-2 因子層 SSOT（rules_factors.yaml）
+#
+# 角色：
+# - 因子 Registry：定義 factor_id / category / engine / universe / wf_windows / gate_rules
+# - gate-ready SLO：定義最少因子數、每個 window 需要幾個因子、關鍵必備因子
+#
+# 消費者：
+# - scripts/factor_registry.py         → 只看 top-level "factors"
+# - tools/factors/Run-Phase2-OneClick.ps1
+#     → 主要使用 gate_ready.profiles.<profile>.* 的門檻，
+#       factor_slo_lib 會讀取 gate_ready.* 產生 wf_summary.factor_slo
+# - Run-WFGate.ps1 的 factor_checks 之後也會讀同一份 gate_ready。
+# ============================================================================
+
+version: 1
+name: "Phase-2 factor SSOT"
+description: >
+  Single source of truth for factor definitions and gate-ready SLO.
+  This file is intended to be machine-checked and consumed by both
+  the factor pipeline and the WFGate.
+
+metadata:
+  owner: "quant-research"
+  maintainer: "quant-research"
+  created_at: "2025-11-19"
+  updated_at: "2025-12-03"
+  timezone: "Asia/Taipei"
+
+# ---------------------------------------------------------------------------
+# Corr / max_corr 契約說明
+#
+# - corr 計算由 alpha_core.corr_lib 完成：
+#     * compute_corr_matrix 產生相關矩陣
+#     * summarize_corr 產生 max_abs_per_factor[factor_id]（最大 |corr|）
+# - scripts/factor_corr.py 為唯一執行入口，輸出：
+#     * reports/factor_corr/corr_matrix_<as_of>_<window>.parquet
+#     * reports/factor_corr/corr_pairs_<as_of>_<window>.parquet
+#     * reports/factor_corr/corr_summary_<as_of>_<window>.json
+# - gate_rules.max_corr 的語意：
+#     * 以 corr_summary.max_abs_corr_per_factor[factor_id] 為來源
+#     * 當啟用 corr gating 時，需滿足：
+#         max_abs_corr_per_factor[factor_id] <= gate_rules.max_corr
+# - 目前階段：
+#     * corr 主要作為觀察與報表指標，Gate 尚未必然強制使用。
+#     * 未來若將 max_corr 納入 Gate 硬門檻，本檔不需變更，
+#       只需在 compose / factor_slo_check 內讀取 corr_summary。
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# gate_ready：gate-ready SLO-as-code
+# ---------------------------------------------------------------------------
+
+gate_ready:
+  # 全域預設（等同 live profile，供未來 Gate 或「無 profile」情境使用）
+  min_factors: 8
+  min_factors_per_window: 3
+  per_window:
+    "6":
+      min_factors: 3
+    "12":
+      min_factors: 3
+    "24":
+      min_factors: 2
+
+  # 全域必備因子清單（所有 profile 共用為預設值，可被 profile override）
+  required_factors:
+    - mom_6m
+    - value_pe
+    - quality_roeq
+
+  # per-engine SLO（目前主要給 Gate / 報表參考）
+  engines:
+    classic:
+      min_factors: 8
+      min_factors_per_window: 3
+      per_window:
+        "6":
+          min_factors: 3
+        "12":
+          min_factors: 3
+        "24":
+          min_factors: 2
+      required_factors:
+        - mom_6m
+        - value_pe
+        - quality_roeq
+
+    ai:
+      min_factors: 3
+      min_factors_per_window: 1
+      per_window:
+        "6":
+          min_factors: 1
+        "12":
+          min_factors: 1
+        "24":
+          min_factors: 1
+      required_factors:
+        - ai_xgb_alpha
+
+  # per-profile SLO：因子層 OneClick / factor_slo_lib 優先讀此區
+  profiles:
+    dev:
+      # ⭐ 開發環境：觀察模式，不強制任何 SLO（只報告，不擋路）
+      #   FactorSloConfig 看到這組會判定「無任何 constraint」→ satisfied=True，
+      #   但仍會回報 total_factors / per_window_counts 等資訊。
+      min_factors: 0
+      min_factors_per_window: 0
+      per_window: {}
+      required_factors: []
+
+    test:
+      # 測試環境：對齊目前真實戰力（約 3 顆 core 因子），但仍要求「多因子 + 多視窗」。
+      # 規則：
+      #   - 至少 3 顆達標（min_factors=3）
+      #   - 每個視窗至少 2 顆（6 / 12m）
+      #   - 必備因子：value_pe（長期核心）
+      min_factors: 3
+      min_factors_per_window: 2
+      per_window:
+        "6":
+          min_factors: 2
+        "12":
+          min_factors: 2
+        "24":
+          min_factors: 0
+      required_factors:
+        - value_pe
+
+    live:
+      # 實際線上（目前 SLO v1.0 主參考值）
+      min_factors: 8
+      min_factors_per_window: 3
+      per_window:
+        "6":
+          min_factors: 3
+        "12":
+          min_factors: 3
+        "24":
+          min_factors: 2
+      required_factors:
+        - mom_6m
+        - value_pe
+        - quality_roeq
+
+    prod:
+      # 保留 profile：先沿用 live 的門檻，未來如需區分再調整
+      min_factors: 8
+      min_factors_per_window: 3
+      per_window:
+        "6":
+          min_factors: 3
+        "12":
+          min_factors: 3
+        "24":
+          min_factors: 2
+      required_factors:
+        - mom_6m
+        - value_pe
+        - quality_roeq
+
+  # 預留未來擴充用欄位（例如 per-regime SLO、額外維度）
+  extras: {}
+
+# ---------------------------------------------------------------------------
+# corr_spec：定義 corr 檔案與 max_corr 的契約（供工具與文件參考）
+# ---------------------------------------------------------------------------
+
+corr_spec:
+  # corr Summary 的輸出路徑與檔名模式
+  output_dir: "reports/factor_corr"
+  matrix_pattern: "corr_matrix_<as_of>_<window>.parquet"
+  pairs_pattern: "corr_pairs_<as_of>_<window>.parquet"
+  summary_pattern: "corr_summary_<as_of>_<window>.json"
+
+  # max_corr 的計算來源與語意
+  metric_source: "summary_json"
+  metric_key: "max_abs_corr_per_factor"
+  metric_semantics: >
+    For each factor_id f, max_abs_corr_per_factor[f] is defined as:
+    max_{g != f} |corr(f, g)|, computed from the correlation matrix.
+
+  # gate_rules.max_corr 的標準對應：
+  #   max_abs_corr_per_factor[factor_id] <= gate_rules.max_corr
+  gate_rules_field: "max_corr"
+  gate_behavior: >
+    Currently informative-only; when corr gating is enabled in the future,
+    this field will be used as the maximum allowed absolute correlation
+    threshold per factor.
+
+# ---------------------------------------------------------------------------
+# engines：因子引擎與預設 wf_windows 規格（目前屬 meta，提供參考）
+# ---------------------------------------------------------------------------
+
+engines:
+  classic:
+    description: "Rule-based / TA-style factors computed from silver prices/chip/per/dividend."
+    wf_windows: [6, 12, 24]
+  ai:
+    description: "ML-based / XGBoost-style factors trained on historical alpha pool."
+    wf_windows: [12, 24]
+
+# ---------------------------------------------------------------------------
+# freshness_defaults：因子新鮮度預設（以月份為單位）
+# ---------------------------------------------------------------------------
+
+freshness_defaults:
+  daily:
+    lag_months_max: 0
+  monthly:
+    lag_months_max: 0
+  quarterly:
+    lag_months_max: 4
+
+# ---------------------------------------------------------------------------
+# factors：實際因子定義（給 factor_registry / factor_engine / factor_eval 用）
+#
+# schema（對應 factor_registry.FactorConfig）：
+#   - factor_id   : string（無空白、唯一）
+#   - category    : 'classic' / 'ai' / 'other'（for Engine routing）
+#   - description : 人類可讀說明
+#   - universe    : 使用哪一套 universe 定義
+#   - data_freq   : 'daily' / 'weekly' / 'monthly' / 'quarterly'
+#   - engine      : 實作用 engine id（留給 factor_engine / impl_module 決定）
+#   - impl_notes  : 可選文字，說明實作細節 / TODO 狀態
+#   - params      : engine 相關參數（lookback_days / window_days 等），完全由 SSOT 管理
+#   - wf_windows  : 該因子要參與哪幾個 WF 視窗（subset of [6,12,24]）
+#   - gate_rules  : per-factor gate SLO（對應 GateRules）
+#   - enabled     : bool（false 表示暫時不參與 Phase-2 pipeline）
+#   - freshness   : （可選）新鮮度判斷規則 {freq, lag_months_max}
+#
+# 其它欄位會被歸入 FactorConfig.extras，不影響契約。
+# ---------------------------------------------------------------------------
+
+factors:
+  # -------------------------------------------------------------------------
+  # Momentum family
+  # -------------------------------------------------------------------------
+  - factor_id: mom_12m
+    category: classic
+    description: "12-month price momentum (skip last month) on investable universe."
+    universe: tw_eq_investable
+    data_freq: daily
+    engine: ta_mom_v1
+    impl_notes: "Standard 12M momentum with 1M skip; implementation uses trading_days calendar and log-returns."
+    params:
+      lookback_days: 252
+    wf_windows: [6, 12, 24]
+    gate_rules:
+      # 開發階段：先只用 min_rank_ic + min_coverage 做基本 gate。
+      # turnover / max_corr 之後等 eval / corr 指標補齊再啟用。
+      min_rank_ic: 0.03
+      min_coverage: 0.90
+      # max_turnover: 0.30   # TODO: enable when turnover is available in factor_eval
+      # max_corr: 0.70       # TODO: enable when corr_summary is wired into gating
+      psr_min: 0.90
+      max_drawdown: 0.20
+    enabled: true
+
+  - factor_id: mom_6m
+    category: classic
+    description: "6-month price momentum (skip last month) on investable universe."
+    universe: tw_eq_investable
+    data_freq: daily
+    engine: ta_mom_v1
+    impl_notes: "Shorter horizon momentum; implementation uses trading_days calendar and log-returns."
+    params:
+      lookback_days: 126
+    wf_windows: [6, 12]
+    gate_rules:
+      min_rank_ic: 0.02
+      min_coverage: 0.90
+      # max_turnover: 0.35   # TODO: enable when turnover is available in factor_eval
+      # max_corr: 0.75       # TODO: enable when corr_summary is wired into gating
+    enabled: true
+
+  # -------------------------------------------------------------------------
+  # Volatility / Risk family
+  # -------------------------------------------------------------------------
+  - factor_id: vol_20d
+    category: classic
+    description: "20-day realized volatility (inverse risk factor when used as low-vol)."
+    universe: tw_eq_investable
+    data_freq: daily
+    engine: ta_vol_v1
+    impl_notes: "Realized volatility computed from daily log-returns; engine uses rolling std with min_periods=window_days."
+    params:
+      window_days: 20
+    wf_windows: [6, 12, 24]
+    gate_rules:
+      min_rank_ic: 0.015
+      min_coverage: 0.95
+      # max_turnover: 0.25   # TODO: enable when turnover is available in factor_eval
+      # max_corr: 0.70       # TODO: enable when corr_summary is wired into gating
+    enabled: true
+
+  - factor_id: beta_252d
+    category: classic
+    description: "252-day market beta vs TW market index (proxy from equal-weighted universe)."
+    universe: tw_eq_investable
+    data_freq: daily
+    engine: ta_beta_v1
+    impl_notes: >
+      Rolling beta computed from daily log-returns:
+      per stock x = ret_stock, market y = equal-weighted ret_mkt over investable universe.
+      Uses trading_days calendar, rolling window_days (default 252) on Cov(x,y)/Var(y)
+      implemented in alpha_core.factor_impl (ta_beta_v1). Dev/test 可先用來觀察 beta 分佈，
+      live profile 仍需經過 factor_eval / Gate 驗證品質後再納入正式 multi-factor 池。
+    params:
+      window_days: 252
+    wf_windows: [12, 24]
+    gate_rules:
+      min_rank_ic: 0.010
+      min_coverage: 0.95
+      # max_turnover: 0.20   # TODO: enable when turnover is available in factor_eval
+      # max_corr: 0.80       # TODO: enable when corr_summary is wired into gating
+    enabled: true   # ta_beta_v1 已實作；dev/test 下先觀察，正式啟用前仍需 Gate 驗收
+
+  # -------------------------------------------------------------------------
+  # Value family
+  # -------------------------------------------------------------------------
+  - factor_id: value_pe
+    category: classic
+    description: "Value factor based on earnings yield (1 / PE), sector-neutralized."
+    universe: tw_eq_investable
+    data_freq: monthly
+    engine: fundamental_value_v1
+    impl_notes: >
+      Uses PER silver table; alpha_core.factor_impl normalizes PE columns and computes earnings yield (1/PE).
+      Currently outputs daily-dated factor values; sector-neutralization is applied downstream in evaluation/combo.
+    wf_windows: [12, 24]
+    gate_rules:
+      min_rank_ic: 0.025
+      min_coverage: 0.85
+      # max_turnover: 0.20   # TODO: enable when turnover is available in factor_eval
+      # max_corr: 0.75       # TODO: enable when corr_summary is wired into gating
+    enabled: true
+
+  - factor_id: value_pb
+    category: classic
+    description: "Book-to-price value factor (1 / PB), sector-neutralized."
+    universe: tw_eq_investable
+    data_freq: monthly
+    engine: fundamental_value_v1
+    impl_notes: >
+      PB-based value; planned to reuse fundamental_value_v1 once PB fields are wired in silver PER-like tables.
+      Currently not implemented in alpha_core, so kept disabled.
+    wf_windows: [12, 24]
+    gate_rules:
+      min_rank_ic: 0.020
+      min_coverage: 0.85
+      # max_turnover: 0.20   # TODO: enable when turnover is available in factor_eval
+      # max_corr: 0.80       # TODO: enable when corr_summary is wired into gating
+    enabled: false    # 先關掉，之後 PB 資料接好再啟用
+
+  # -------------------------------------------------------------------------
+  # Quality family
+  # -------------------------------------------------------------------------
+  - factor_id: quality_roeq
+    category: classic
+    description: "Return-on-equity quality factor (quarterly fundamental data, TTM-ROE)."
+    universe: tw_eq_investable
+    data_freq: monthly
+    engine: fundamental_quality_v1
+    impl_notes: >
+      Uses silver finstmt tables; alpha_core.factor_impl auto-detects net_income / equity-like columns
+      and computes ROE = NI / Equity on reporting dates (coarse TTM/period-level).
+      Daily alignment / sector-neutralization are handled downstream in evaluation/combo.
+      若 finstmt schema 未完全對齊，開發階段可能回傳空結果（dev-safe）。
+    wf_windows: [12, 24]
+    gate_rules:
+      min_rank_ic: 0.020
+      min_coverage: 0.80
+      # max_turnover: 0.25   # TODO: enable when turnover is available in factor_eval
+      # max_corr: 0.75       # TODO: enable when corr_summary is wired into gating
+    freshness:
+      freq: quarterly
+      lag_months_max: 4
+    enabled: true
+
+  # -------------------------------------------------------------------------
+  # Liquidity / Size family
+  # -------------------------------------------------------------------------
+  - factor_id: liq_turnover_20d
+    category: classic
+    description: "20-day average turnover (%ADV) as liquidity style factor."
+    universe: tw_eq_investable
+    data_freq: daily
+    engine: microstructure_v1
+    impl_notes: >
+      Uses turnover_rate-like column from silver prices, with rolling mean over window_days.
+      若 turnover_rate 缺失，未來可改為 volume-based proxy；目前若關鍵欄位不存在則回傳空（dev-safe）。
+    params:
+      window_days: 20
+    wf_windows: [6, 12, 24]
+    gate_rules:
+      min_rank_ic: 0.010
+      min_coverage: 0.95
+      # max_turnover: 0.15   # TODO: enable when turnover is available in factor_eval
+      # max_corr: 0.80       # TODO: enable when corr_summary is wired into gating
+    enabled: true
+
+  - factor_id: size_log_mktcap
+    category: classic
+    description: "Log market capitalization size factor."
+    universe: tw_eq_investable
+    data_freq: daily
+    engine: microstructure_v1
+    impl_notes: >
+      Non-alpha style factor (size); implementation uses log(market_cap) from silver prices.
+      若 market_cap-like 欄位尚未接好，則 engine 回傳空（dev-safe），不會阻塞整體 pipeline。
+    wf_windows: [12, 24]
+    gate_rules:
+      min_rank_ic: 0.005
+      min_coverage: 0.95
+      # max_turnover: 0.10   # TODO: enable when turnover is available in factor_eval
+      # max_corr: 0.85       # TODO: enable when corr_summary is wired into gating
+    freshness:
+      freq: quarterly
+      lag_months_max: 4
+    enabled: true
+
+  # -------------------------------------------------------------------------
+  # AI / ML factor family（預留）
+  # -------------------------------------------------------------------------
+  - factor_id: ai_xgb_alpha
+    category: ai
+    description: "XGBoost-based composite alpha factor trained on classic factor pool."
+    universe: tw_eq_investable
+    data_freq: daily
+    engine: ai_xgb_v1
+    impl_notes: >
+      Consumes classic factors as features; training and model versioning
+      governed by separate config. alpha_core.factor_impl currently keeps
+      ai_xgb_v1 as a skeleton (returns empty) until Phase-2 later stage.
+    wf_windows: [12, 24]
+    gate_rules:
+      min_rank_ic: 0.035
+      min_coverage: 0.80
+      # max_turnover: 0.35   # TODO: enable when turnover is available in factor_eval
+      # max_corr: 0.85       # TODO: enable when corr_summary is wired into gating
+      psr_min: 1.00
+    enabled: false  # 預留，之後 Phase-2 後半段（AI 引擎）再開啟

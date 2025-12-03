@@ -1,31 +1,73 @@
-# configs\dateid_datasets.yaml
-datasets:
-  # --- Technical / Price family ---
-  - { table: TaiwanStockPrice,                  id_key: stock_id }
-  - { table: TaiwanStockWeekPrice,              id_key: stock_id }
-  - { table: TaiwanStockMonthPrice,             id_key: stock_id }
-  - { table: TaiwanStockPriceAdj,               id_key: stock_id }
-  - { table: TaiwanStockPriceTick,              id_key: stock_id }
-  - { table: TaiwanStockPER,                    id_key: stock_id }
-  - { table: TaiwanStockDayTrading,             id_key: stock_id }
-  - { table: TaiwanStock10Year,                 id_key: stock_id }
-  - { table: TaiwanStockKBar,                   id_key: data_id }
-  # --- Chip ---
-  - { table: TaiwanStockMarginPurchaseShortSale,        id_key: stock_id }
-  - { table: TaiwanStockInstitutionalInvestorsBuySell,  id_key: stock_id }
-  - { table: TaiwanStockShareholding,                   id_key: data_id }
-  - { table: TaiwanStockSecuritiesLending,              id_key: stock_id }
-  - { table: TaiwanDailyShortSaleBalances,              id_key: stock_id }
-  # --- Fundamental ---
-  - { table: TaiwanStockFinancialStatements,            id_key: stock_id }
-  - { table: TaiwanStockBalanceSheet,                   id_key: stock_id }
-  - { table: TaiwanStockCashFlowsStatement,             id_key: stock_id }
-  - { table: TaiwanStockDividend,                       id_key: stock_id }
-  - { table: TaiwanStockDividendResult,                 id_key: stock_id }
-  - { table: TaiwanStockMonthRevenue,                   id_key: stock_id }
-  - { table: TaiwanStockCapitalReductionReferencePrice, id_key: stock_id }
-  - { table: TaiwanStockMarketValue,                    id_key: stock_id }
-  - { table: TaiwanStockMarketValueWeight,              id_key: stock_id }
-  - { table: TaiwanStockSplitPrice,                     id_key: stock_id }
-  - { table: TaiwanStockParValueChange,                 id_key: stock_id }
-  - { table: TaiwanStockDelisting,                      id_key: stock_id }
+# File: config/dateid_datasets.yaml
+# SSOT for Phase-1 dateID datasets.
+# 六個 dataset key 必須完整且與 EXPECTED_KEYS 相同：
+#   finstmt, bs, cfs, shareholding, inst_total, gov_bank
+
+dateid_datasets:
+  finstmt:
+    key: finstmt
+    finmind_name: TaiwanStockFinancialStatements
+    # 相對於 datahub-root 的路徑；目前銀河位置：datahub/silver/alpha/finstmt
+    output_root: silver/alpha/finstmt
+    # 可用資料最早日期（可依實際情況調整）
+    min_date: 2004-01-01
+    enabled: true
+    frequency: quarterly
+    required_columns:
+      - date
+      - stock_id
+
+  bs:
+    key: bs
+    finmind_name: TaiwanStockBalanceSheet
+    output_root: silver/alpha/bs
+    min_date: 2004-01-01
+    enabled: true
+    frequency: quarterly
+    required_columns:
+      - date
+      - stock_id
+
+  cfs:
+    key: cfs
+    finmind_name: TaiwanStockCashFlowsStatement
+    output_root: silver/alpha/cfs
+    min_date: 2004-01-01
+    enabled: true
+    frequency: quarterly
+    required_columns:
+      - date
+      - stock_id
+
+  shareholding:
+    key: shareholding
+    finmind_name: TaiwanStockShareholding
+    output_root: silver/alpha/shareholding
+    min_date: 2004-01-01
+    enabled: true
+    frequency: daily
+    required_columns:
+      - date
+      - stock_id
+
+  inst_total:
+    key: inst_total
+    finmind_name: TaiwanStockTotalInstitutionalInvestors
+    output_root: silver/alpha/inst_total
+    min_date: 2004-01-01
+    enabled: true
+    frequency: daily
+    required_columns:
+      - date
+      - stock_id
+
+  gov_bank:
+    key: gov_bank
+    finmind_name: TaiwanStockGovernmentBankBuySell
+    output_root: silver/alpha/gov_bank
+    min_date: 2004-01-01
+    enabled: true
+    frequency: daily
+    required_columns:
+      - date
+      - stock_id

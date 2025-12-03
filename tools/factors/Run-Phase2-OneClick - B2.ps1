@@ -15,14 +15,10 @@ param(
     [string]$RulesPath = '.\rules_factors.yaml',          # 因子規則 SSOT
     [int]$MaxFactorsPerBatch = 20,                        # 每批最多因子數
 
-    # corr 控制：auto = dev 多半關、test/live 開；on = 強制跑；off = 強制不跑
-    [ValidateSet('auto','on','off')]
-    [string]$CorrMode = 'auto',
-
     [switch]$ComposeToWF,                                 # 是否在 B 段執行 compose_factors_to_wf
     [switch]$AutoGate,                                    # 是否在 B 段執行 Run-WFGate.ps1（ShowOnly）
 
-    [switch]$DumpPlan,                                    # 是否提示 factor_plan JSON 位置
+    [switch]$DumpPlan,                                    # 是否輸出 factor_plan.<Date>.json
     [string]$PythonExe = '.\.venv\Scripts\python.exe'     # Python 執行檔
 )
 
@@ -143,91 +139,106 @@ function Resolve-ProfileAndMode {
     return $effective
 }
 
-# ---------------------------------------------------------------------------
-# Utility: 透過 factor_plan_lib.py 建立 plan（Python 為 SSOT）
-# ---------------------------------------------------------------------------
 function New-FactorPlan {
     param(
-        [Parameter(Mandatory = $true)][string]$Date,
+        [Parameter(Mandatory = $true)]$Registry,
+        [Parameter(Mandatory = $true)]$StatusRecords,
+        [Parameter(Mandatory = $true)][string]$Mode,
         [Parameter(Mandatory = $true)][string]$Profile,
         [Parameter(Mandatory = $true)][string]$Engine,
-        [Parameter(Mandatory = $true)][string]$Root,
-        [Parameter(Mandatory = $true)][string]$RulesPath,
-        [Parameter(Mandatory = $true)][string]$StatusJsonPath,
-        [Parameter(Mandatory = $true)][string]$PythonExe,
         [int]$MaxFactorsPerBatch = 20,
         [int[]]$WfWindows = @(6, 12, 24)
     )
 
-    # 決定要規劃哪種 engine_kind（classic / ai / all）
-    $engineKinds = @()
-    switch ($Engine) {
-        'classic' { $engineKinds = @('classic') }
-        'ai'      { $engineKinds = @('ai') }
-        'all'     { $engineKinds = @('classic','ai') }
-        default   { throw "Unsupported Engine: $Engine" }
+    # 建立 registry 索引：factor_id → config
+    $registryIndex = @{}
+    foreach ($f in $Registry.factors) {
+        if (-not $f.factor_id) { continue }
+        $registryIndex[$f.factor_id] = $f
     }
 
-    $reportsDir = Join-Path $Root 'reports'
-    if (-not (Test-Path -LiteralPath $reportsDir)) {
-        New-Item -ItemType Directory -Path $reportsDir | Out-Null
-    }
+    $planItems = @()
 
-    $planScript = Join-Path $Root 'scripts\factor_plan_lib.py'
-    if (-not (Test-Path -LiteralPath $planScript)) {
-        throw "factor_plan_lib.py not found at $planScript"
-    }
+    foreach ($s in $StatusRecords) {
+        $fid = $s.factor_id
+        if (-not $fid) { continue }
 
-    $allItems = @()
-
-    foreach ($engKind in $engineKinds) {
-        $planPath = Join-Path $reportsDir ("factor_plan.{0}.{1}.json" -f $Date, $engKind)
-
-        # 準備 wf-window 參數
-        $wfWindowArgs = @()
-        foreach ($w in $WfWindows) {
-            $wfWindowArgs += @('--wf-window', "$w")
+        $cfg = $null
+        if ($registryIndex.ContainsKey($fid)) {
+            $cfg = $registryIndex[$fid]
         }
 
-        $args = @(
-            '--root',        $Root,
-            '--date',        $Date,
-            '--profile',     $Profile,
-            '--engine',      $engKind,
-            '--rules-path',  $RulesPath,
-            '--status-path', $StatusJsonPath,
-            '--output',      $planPath
-        ) + $wfWindowArgs
-
-        Write-Phase2Info ("Building factor plan via factor_plan_lib.py for engine={0}" -f $engKind)
-        $null = Invoke-PythonTool -PythonExePath $PythonExe `
-                                  -ScriptPath  $planScript `
-                                  -Arguments   $args
-
-        if (-not (Test-Path -LiteralPath $planPath)) {
-            throw "factor_plan_lib.py did not produce expected JSON file: $planPath"
+        # -------------------------
+        # engine 決策：
+        # - 若 registry 裡沒填 engine 或是空字串 → 視為 'classic'
+        # - 若有填 → 用原本的值（'classic' / 'ai'）
+        # -------------------------
+        $engineTag = $null
+        if ($cfg -and $cfg.engine) {
+            $engineTag = [string]$cfg.engine
+        } else {
+            $engineTag = 'classic'
         }
 
-        $planJson = Get-Content -LiteralPath $planPath -Raw | ConvertFrom-Json -Depth 30
-        if ($planJson -and $planJson.items) {
-            foreach ($item in $planJson.items) {
-                # 標記 engine_kind / profile / windows（純資訊，無邏輯）
-                if (-not $item.PSObject.Properties['engine_kind']) {
-                    $item | Add-Member -NotePropertyName 'engine_kind' -NotePropertyValue $planJson.engine_kind -Force
+        # 依 CLI 參數 Engine 過濾（classic / ai / all）
+        if ($Engine -eq 'classic' -and $engineTag -ne 'classic') { continue }
+        if ($Engine -eq 'ai'      -and $engineTag -ne 'ai')      { continue }
+        # Engine='all' → 不過濾
+
+        $requiredAction = if ($s.required_action) { $s.required_action } else { 'unknown' }
+
+        # Mode × required_action 決策表
+        $decidedAction = switch ($Mode) {
+            'dryrun' {
+                switch ($requiredAction) {
+                    'missing'      { 'compute+eval' }
+                    'rebuild'      { 'compute+eval' }
+                    'ok'           { 'skip' }
+                    'orphan_data'  { 'orphan' }
+                    default        { 'unknown' }
                 }
-                if (-not $item.PSObject.Properties['profile']) {
-                    $item | Add-Member -NotePropertyName 'profile' -NotePropertyValue $planJson.profile -Force
+            }
+            'evalonly' {
+                switch ($requiredAction) {
+                    'missing'      { 'compute+eval' }  # 只標計畫，B 段會依 Mode 決定是否實跑
+                    'rebuild'      { 'eval_only' }
+                    'ok'           { 'skip' }
+                    'orphan_data'  { 'orphan' }
+                    default        { 'unknown' }
                 }
-                if (-not $item.PSObject.Properties['windows']) {
-                    $item | Add-Member -NotePropertyName 'windows' -NotePropertyValue $planJson.wf_windows -Force
+            }
+            'commit' {
+                switch ($requiredAction) {
+                    'missing'      { 'compute+eval' }
+                    'rebuild'      { 'compute+eval' }
+                    'ok'           { 'skip' }
+                    'orphan_data'  { 'orphan' }
+                    default        { 'unknown' }
                 }
-                $allItems += $item
+            }
+            default {
+                throw "Unsupported Mode: $Mode"
             }
         }
+
+        $planItems += [pscustomobject]@{
+            factor_id        = $fid
+            category         = if ($cfg) { $cfg.category } else { $null }
+            engine           = $engineTag
+            enabled          = if ($cfg) { $cfg.enabled } else { $null }
+            required_action  = $requiredAction
+            decided_action   = $decidedAction
+            profile          = $Profile
+            mode             = $Mode
+            windows          = $WfWindows
+            batch_index      = $null  # 後面分批再填
+        }
     }
 
-    # 分配 batch_index：只對 active 因子 (compute+eval / eval_only)
-    $active = $allItems | Where-Object { $_.decided_action -in @('compute+eval','eval_only') }
+    # 依 decided_action 分配 batch_index（只對 compute+eval / eval_only）
+    $active = $planItems | Where-Object {
+        $_.decided_action -in @('compute+eval', 'eval_only')
+    }
 
     $batchIndex = 0
     $counter    = 0
@@ -237,70 +248,11 @@ function New-FactorPlan {
             $batchIndex++
             $counter = 0
         }
-        if (-not $item.PSObject.Properties['batch_index']) {
-            $item | Add-Member -NotePropertyName 'batch_index' -NotePropertyValue $batchIndex -Force
-        } else {
-            $item.batch_index = $batchIndex
-        }
+        $item.batch_index = $batchIndex
         $counter++
     }
 
-    return $allItems
-}
-
-# ---------------------------------------------------------------------------
-# Utility: corr phase（呼叫 scripts\factor_corr.py）
-# ---------------------------------------------------------------------------
-function Invoke-FactorCorr {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$PythonExePath,
-        [Parameter(Mandatory = $true)]
-        [string]$RootPath,
-        [Parameter(Mandatory = $true)]
-        [string]$RulesPath,
-        [Parameter(Mandatory = $true)]
-        [string]$AsOfDate,
-        [Parameter(Mandatory = $true)]
-        [string]$Profile,
-        [Parameter(Mandatory = $true)]
-        [string]$Engine,
-        [Parameter(Mandatory = $true)]
-        [int[]]$WfWindows
-    )
-
-    # 如果沒有 window，就沒什麼好算
-    if (-not $WfWindows -or $WfWindows.Count -eq 0) {
-        Write-Phase2Info "Invoke-FactorCorr: WfWindows is empty → corr phase skipped."
-        return
-    }
-
-    $corrScript = Join-Path $RootPath 'scripts\factor_corr.py'
-    if (-not (Test-Path -LiteralPath $corrScript)) {
-        Write-Phase2Warn "factor_corr.py not found at $corrScript; corr phase skipped."
-        return
-    }
-
-    # Engine='all' 暫時以 classic 為 corr 視角
-    $corrEngine = if ($Engine -eq 'all') { 'classic' } else { $Engine }
-    $windowsArg = ($WfWindows -join ',')
-
-    Write-Phase2Info ("Starting corr phase via factor_corr.py (engine={0}, windows={1})" -f $corrEngine, $windowsArg)
-
-    $args = @(
-        '--root',         $RootPath,
-        '--rules',        $RulesPath,
-        '--as-of',        $AsOfDate,
-        '--windows',      $windowsArg,
-        '--engine',       $corrEngine,
-        '--profile',      $Profile,
-        '--panel-source', 'factor_parquet',
-        '--log-level',    'INFO'
-    )
-
-    $null = Invoke-PythonTool -PythonExePath $PythonExePath `
-                              -ScriptPath  $corrScript `
-                              -Arguments   $args
+    return $planItems
 }
 
 # ---------------------------------------------------------------------------
@@ -308,7 +260,7 @@ function Invoke-FactorCorr {
 # ---------------------------------------------------------------------------
 Set-Location -LiteralPath $Root
 Write-Phase2Info "Run-Phase2-OneClick (A-segment: plan)"
-Write-Phase2Info "Root=$Root Date=$Date Profile=$Profile Mode(raw)=$Mode Engine=$Engine CorrMode=$CorrMode"
+Write-Phase2Info "Root=$Root Date=$Date Profile=$Profile Mode(raw)=$Mode Engine=$Engine"
 
 $asOfDate = Get-AsOfDate -DateText $Date
 $resolved = Resolve-ProfileAndMode -Profile $Profile -Mode $Mode
@@ -325,80 +277,76 @@ if (-not (Test-Path -LiteralPath $reportsDir)) {
 }
 
 # ---------------------------------------------------------------------------
-# 呼叫 factor_status.py 產生狀態 JSON（提供給 factor_plan_lib）
+# 呼叫 factor_registry.py 取得 registry JSON
+# ---------------------------------------------------------------------------
+$registryScript = Join-Path $Root 'scripts\factor_registry.py'
+$registryJson = Invoke-PythonJson -PythonExePath $PythonExe `
+                                  -ScriptPath $registryScript `
+                                  -Arguments @(
+                                      '--root',  $Root,
+                                      '--rules', $RulesPath,
+                                      '--json',
+                                      '--log-level', 'WARNING'
+                                  )
+
+if (-not $registryJson) {
+    throw "Failed to load factor registry (no JSON returned)."
+}
+
+# ---------------------------------------------------------------------------
+# 呼叫 factor_status.py 取得 status JSON
 # ---------------------------------------------------------------------------
 $statusScript   = Join-Path $Root 'scripts\factor_status.py'
 $statusJsonPath = Join-Path $reportsDir ("factor_status.{0}.json" -f $Date)
 
 $null = Invoke-PythonTool -PythonExePath $PythonExe `
-                          -ScriptPath  $statusScript `
-                          -Arguments   @(
+                          -ScriptPath $statusScript `
+                          -Arguments @(
                               '--root',         $Root,
-                              '--date',         $Date,
-                              '--profile',      $effectiveProfile,
-                              '--engine',       $Engine,
                               '--expect-date',  $Date,
                               '--window-months','24',
                               '--rules',        $RulesPath,
-                              '--output',       $statusJsonPath,
-                              '--log-level',    'INFO'
+                              '--output-json',  $statusJsonPath,
+                              '--log-level',    'WARNING'
                           )
 
 if (-not (Test-Path -LiteralPath $statusJsonPath)) {
     throw "factor_status.py did not produce expected JSON file: $statusJsonPath"
 }
-Write-Phase2Info "factor_status JSON written to $statusJsonPath"
+
+$statusRecords = Get-Content -LiteralPath $statusJsonPath -Raw | ConvertFrom-Json -Depth 10
+if (-not $statusRecords) {
+    Write-Phase2Warn "No factor status records found in $statusJsonPath."
+    $statusRecords = @()
+}
 
 # ---------------------------------------------------------------------------
-# 呼叫 factor_plan_lib.py 建立因子計畫（Python SSOT）
+# 建立 plan
 # ---------------------------------------------------------------------------
-$planItems = New-FactorPlan `
-    -Date               $Date `
-    -Profile            $effectiveProfile `
-    -Engine             $Engine `
-    -Root               $Root `
-    -RulesPath          $RulesPath `
-    -StatusJsonPath     $statusJsonPath `
-    -PythonExe          $PythonExe `
-    -MaxFactorsPerBatch $MaxFactorsPerBatch `
-    -WfWindows          $wfWindows
+$planItems = New-FactorPlan -Registry $registryJson `
+                            -StatusRecords $statusRecords `
+                            -Mode $effectiveMode `
+                            -Profile $effectiveProfile `
+                            -Engine $Engine `
+                            -MaxFactorsPerBatch $MaxFactorsPerBatch `
+                            -WfWindows $wfWindows
 
 $Global:Phase2Plan = $planItems
 
 # 統計摘要
-if ($planItems -and $planItems.Count -gt 0) {
-    $byAction = $planItems | Group-Object -Property decided_action | Sort-Object -Property Name
-    foreach ($g in $byAction) {
-        Write-Phase2Info ("Plan action {0,-12}: {1,4} factors" -f $g.Name, $g.Count)
-    }
-} else {
-    Write-Phase2Info "Plan contains 0 factors for Engine=$Engine (all filtered or no plan items)."
+$byAction = $planItems | Group-Object -Property decided_action | Sort-Object -Property Name
+foreach ($g in $byAction) {
+    Write-Phase2Info ("Plan action {0,-12}: {1,4} factors" -f $g.Name, $g.Count)
 }
 
-$activeItems = @()
-if ($planItems) {
-    $activeItems = $planItems | Where-Object { $_.decided_action -in @('compute+eval','eval_only') }
-}
-$activeCount = if ($activeItems) { $activeItems.Count } else { 0 }
+$activeCount = ($planItems | Where-Object { $_.decided_action -in @('compute+eval','eval_only') }).Count
 Write-Phase2Info "Active factors (compute+eval / eval_only): $activeCount"
 
-if ($activeCount -eq 0) {
-    Write-Phase2Info "No active factors → engine/eval phases will be skipped (但仍可執行 ComposeToWF/SLO)。"
-}
-
-# 提示 factor_plan JSON 位置（Python 已輸出）
+# 可選：輸出 factor_plan.<Date>.json
 if ($DumpPlan.IsPresent) {
-    if ($Engine -eq 'all') {
-        $engList = @('classic','ai')
-    } else {
-        $engList = @($Engine)
-    }
-    foreach ($e in $engList) {
-        $p = Join-Path $reportsDir ("factor_plan.{0}.{1}.json" -f $Date, $e)
-        if (Test-Path -LiteralPath $p) {
-            Write-Phase2Info "Factor plan JSON available at $p"
-        }
-    }
+    $planPath = Join-Path $reportsDir ("factor_plan.{0}.json" -f $Date)
+    ($planItems | ConvertTo-Json -Depth 10) | Set-Content -LiteralPath $planPath -Encoding UTF8
+    Write-Phase2Info "Wrote factor plan JSON to $planPath"
 }
 
 # ---------------------------------------------------------------------------
@@ -406,9 +354,8 @@ if ($DumpPlan.IsPresent) {
 # 依照 A 段產生的 $Global:Phase2Plan，實際執行
 # 1) engine (compute parquet)
 # 2) eval (factor_eval)
-# 3) corr phase（可選）
-# 4) compose_factors_to_wf + factor_slo
-# 5) AutoGate（可選）
+# 3) compose_factors_to_wf + factor_slo
+# 4) AutoGate（可選）
 # ---------------------------------------------------------------------------
 
 function Invoke-FactorEngineBatches {
@@ -421,14 +368,9 @@ function Invoke-FactorEngineBatches {
         [string]$RulesPath,
         [Parameter(Mandatory = $true)]
         [int[]]$WfWindows,
+        [Parameter(Mandatory = $true)]
         [object[]]$PlanItems
     )
-
-    # 空計畫直接跳過
-    if (-not $PlanItems -or $PlanItems.Count -eq 0) {
-        Write-Phase2Info "Invoke-FactorEngineBatches: PlanItems is empty → engine phase skipped."
-        return
-    }
 
     $engineScript = Join-Path $RootPath 'scripts\factor_engine.py'
 
@@ -478,6 +420,7 @@ function Invoke-FactorEval {
         [int[]]$WfWindows,
         [Parameter(Mandatory = $true)]
         [string]$AsOfDate,
+        [Parameter(Mandatory = $true)]
         [object[]]$PlanItems
     )
 
@@ -485,11 +428,6 @@ function Invoke-FactorEval {
 
     if (-not (Test-Path -LiteralPath $evalScript)) {
         Write-Phase2Warn "factor_eval.py not found at $evalScript; eval phase skipped."
-        return
-    }
-
-    if (-not $PlanItems -or $PlanItems.Count -eq 0) {
-        Write-Phase2Info "Invoke-FactorEval: PlanItems is empty → eval phase skipped."
         return
     }
 
@@ -503,11 +441,9 @@ function Invoke-FactorEval {
         return
     }
 
-    $factorIds  = $active | Select-Object -ExpandProperty factor_id -Unique
-    $windowsArg = ($WfWindows -join ',')   # 關鍵：組成單一參數 "6,12"
+    $factorIds = $active | Select-Object -ExpandProperty factor_id -Unique
 
-    Write-Phase2Info ("Eval phase: {0} factors → {1} (windows={2})" -f `
-        $factorIds.Count, ($factorIds -join ','), $windowsArg)
+    Write-Phase2Info ("Eval phase: {0} factors → {1}" -f $factorIds.Count, ($factorIds -join ','))
 
     foreach ($fid in $factorIds) {
         if (-not $fid) { continue }
@@ -515,9 +451,9 @@ function Invoke-FactorEval {
         $args = @(
             '--root',      $RootPath,
             '--factor-id', $fid,
-            '--windows',   $windowsArg,
-            '--as-of',     $AsOfDate,
-            '--log-level', 'INFO'
+            '--wf-windows'
+        ) + ($WfWindows | ForEach-Object { "$_" }) + @(
+            '--as-of',     $AsOfDate
         )
 
         $null = Invoke-PythonTool -PythonExePath $PythonExePath `
@@ -591,26 +527,21 @@ function Show-FactorSLOFromWfSummary {
 
     $slo = $wf.factor_slo
 
-    $profile = $slo.profile
-    $engine  = $slo.engine
-    $windows = if ($slo.windows) { ($slo.windows -join ',') } else { 'n/a' }
-
-    # per_window_counts 可能是 PSCustomObject，要用 PSObject.Properties 來枚舉
-    $counts = 'n/a'
-    if ($slo.per_window_counts) {
-        $props = $slo.per_window_counts.PSObject.Properties
-        if ($props) {
-            $counts = ($props |
-                Sort-Object -Property Name |
-                ForEach-Object { "{0}:{1}" -f $_.Name, $_.Value }) -join ' '
-        }
+    $profile   = $slo.profile
+    $engine    = $slo.engine
+    $windows   = if ($slo.windows) { ($slo.windows -join ',') } else { 'n/a' }
+    $counts    = if ($slo.per_window_counts) {
+        ($slo.per_window_counts.GetEnumerator() |
+            Sort-Object -Property Name |
+            ForEach-Object { "{0}:{1}" -f $_.Name, $_.Value }) -join ' '
+    } else {
+        'n/a'
     }
-
-    $missing = ''
-    if ($slo.missing_required_factors) {
-        $missing = ($slo.missing_required_factors -join ',')
+    $missing   = if ($slo.missing_required_factors) {
+        ($slo.missing_required_factors -join ',')
+    } else {
+        ''
     }
-
     $satisfied = if ($slo.satisfied -eq $true) { 'YES' } else { 'NO' }
 
     Write-Phase2Info ("[SLO] profile={0} engine={1} windows={2}" -f $profile, $engine, $windows)
@@ -655,94 +586,62 @@ function Invoke-AutoGate {
 
 # Mode=dryrun：只做 A 段規劃，不跑 engine/eval/compose
 if ($effectiveMode -eq 'dryrun') {
-    Write-Phase2Info "Mode=dryrun → planning only. No engine/eval/compose/corr will be executed."
+    Write-Phase2Info "Mode=dryrun → planning only. No engine/eval/compose will be executed."
     Write-Phase2Info "Run-Phase2-OneClick (A-segment only) completed."
     exit 0
 }
 
-# 保險：若 Global Plan 為 $null，改成空陣列但不要提早 exit
 if (-not $Global:Phase2Plan) {
-    Write-Phase2Warn "Global Phase2Plan is null/empty; engine/eval phases will be skipped."
-    $Global:Phase2Plan = @()
+    Write-Phase2Warn "Global Phase2Plan is empty; nothing to execute."
+    Write-Phase2Info "Run-Phase2-OneClick finished (no work)."
+    exit 0
 }
 
 $planItems   = $Global:Phase2Plan
 $activeItems = $planItems | Where-Object { $_.decided_action -in @('compute+eval','eval_only') }
-$activeCount = if ($activeItems) { $activeItems.Count } else { 0 }
 
-Write-Phase2Info ("Execution segment starting for {0} active factors." -f $activeCount)
+if (-not $activeItems -or $activeItems.Count -eq 0) {
+    Write-Phase2Info "No active factors (compute+eval / eval_only) in plan; nothing to do."
+    Write-Phase2Info "Run-Phase2-OneClick finished (A-segment only effective)."
+    exit 0
+}
 
-if ($activeCount -eq 0) {
-    Write-Phase2Info "No active factors → engine/eval/corr phases skipped；僅執行 ComposeToWF / AutoGate（若有指定）。"
+Write-Phase2Info ("Execution segment starting for {0} active factors." -f $activeItems.Count)
+
+# ----------------------
+# 1) Engine phase
+# ----------------------
+if ($effectiveMode -eq 'evalonly') {
+    Write-Phase2Info "Mode=evalonly → engine phase skipped (reuse existing factor parquet)."
 } else {
-    # ----------------------
-    # 1) Engine phase
-    # ----------------------
-    if ($effectiveMode -eq 'evalonly') {
-        Write-Phase2Info "Mode=evalonly → engine phase skipped (reuse existing factor parquet)."
-    } else {
-        Invoke-FactorEngineBatches -PythonExePath $PythonExe `
-                                   -RootPath     $Root `
-                                   -RulesPath    $RulesPath `
-                                   -WfWindows    $wfWindows `
-                                   -PlanItems    $planItems
-    }
-
-    # ----------------------
-    # 2) Eval phase
-    # ----------------------
-    Write-Phase2Info "Starting factor_eval phase."
-    Invoke-FactorEval -PythonExePath $PythonExe `
-                      -RootPath     $Root `
-                      -WfWindows    $wfWindows `
-                      -AsOfDate     $Date `
-                      -PlanItems    $planItems
-
-    # ----------------------
-    # 3) Corr phase（可選）
-    # ----------------------
-    $runCorr = $false
-    switch ($CorrMode) {
-        'on'  { $runCorr = $true }
-        'off' { $runCorr = $false }
-        'auto' {
-            # auto 規則：有 active 因子才跑；dev/profile 可用 CorrMode=off 關閉
-            if ($activeCount -gt 0 -and $effectiveProfile -ne 'dev') {
-                $runCorr = $true
-            } else {
-                $runCorr = $false
-            }
-        }
-    }
-
-    if ($runCorr) {
-        Invoke-FactorCorr -PythonExePath $PythonExe `
-                          -RootPath     $Root `
-                          -RulesPath    $RulesPath `
-                          -AsOfDate     $Date `
-                          -Profile      $effectiveProfile `
-                          -Engine       $Engine `
-                          -WfWindows    $wfWindows
-    } else {
-        Write-Phase2Info ("Corr phase skipped (CorrMode={0}, activeCount={1}, profile={2})." -f $CorrMode, $activeCount, $effectiveProfile)
-    }
+    Invoke-FactorEngineBatches -PythonExePath $PythonExe `
+                               -RootPath     $Root `
+                               -RulesPath    $RulesPath `
+                               -WfWindows    $wfWindows `
+                               -PlanItems    $planItems
 }
 
 # ----------------------
-# 4) Compose to wf_summary + factor_slo
+# 2) Eval phase
+# ----------------------
+Write-Phase2Info "Starting factor_eval phase."
+Invoke-FactorEval -PythonExePath $PythonExe `
+                  -RootPath     $Root `
+                  -WfWindows    $wfWindows `
+                  -AsOfDate     $Date `
+                  -PlanItems    $planItems
+
+# ----------------------
+# 3) Compose to wf_summary + factor_slo
 # ----------------------
 if ($ComposeToWF.IsPresent) {
     Write-Phase2Info "ComposeToWF enabled → composing factor_eval into wf_summary.json + factor_slo."
-
-    # SLO engine 不接受 'all'，預設用 'classic' 作為合併視角
-    $sloEngine = if ($Engine -eq 'all') { 'classic' } else { $Engine }
-
     $wfSummaryPath = Invoke-ComposeFactorsToWF -PythonExePath $PythonExe `
                                                -RootPath     $Root `
                                                -RulesPath    $RulesPath `
                                                -WfWindows    $wfWindows `
                                                -SloProfile   $effectiveProfile `
-                                               -SloEngine    $sloEngine
+                                               -SloEngine    $Engine
 
     Show-FactorSLOFromWfSummary -WfSummaryPath $wfSummaryPath
 } else {
@@ -750,7 +649,7 @@ if ($ComposeToWF.IsPresent) {
 }
 
 # ----------------------
-# 5) AutoGate (optional)
+# 4) AutoGate (optional)
 # ----------------------
 if ($AutoGate.IsPresent -and $ComposeToWF.IsPresent -and $effectiveMode -eq 'commit') {
     Invoke-AutoGate -RootPath $Root -Date $Date
