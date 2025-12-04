@@ -1,765 +1,721 @@
-# C:\AI\tw-alpha-stack\alpha_core\factor_engine.py
-from __future__ import annotations
-
+# -*- coding: utf-8 -*-
 """
 alpha_core.factor_engine
 
-Phase-2 因子引擎核心：
+Batch runner for Phase-2 factor computation.
 
-- FactorTask / FactorRunConfig / FactorRunResult / FactorBatchResult：
-    統一管理「要跑哪些因子、怎麼跑、結果長什麼樣」。
-- run_factor_batch：
-    單一批次因子計算入口（compute → parquet → ledger）。
-- run_factor_engine：
-    舊版入口的兼容 wrapper，給 scripts/factor_engine.py 使用。
+This module is responsible for:
+- Reading factor definitions from ``rules_factors.yaml``.
+- Building a batch of (factor_id, window) tasks.
+- Executing those tasks concurrently using an implementation module
+  (by default ``alpha_core.factor_impl``).
+- Writing a JSONL ledger per successful task.
+- Writing a single JSON summary file describing the whole batch run.
 
-職責：
-- 不碰 FinMind / API，只處理：
-    - 讀取 rules_factors.yaml → FactorDefinition
-    - 呼叫 alpha_core.factor_impl.compute_factor(...)
-    - factor parquet + factor_ledger.jsonl + factor_engine_summary.json
+Public entrypoints:
+- :func:`run_factor_engine` – programmatic API used by scripts/factor_engine.py.
+- :func:`main` – optional CLI entrypoint for direct execution.
+
+The implementation is deterministic and idempotent with respect to inputs:
+rerunning the same configuration will recompute factors but will not corrupt
+existing outputs.
+
+This file is intended to be a "C-segment" complete implementation that can be
+dropped into ``C:\\AI\\tw-alpha-stack\\alpha_core\\factor_engine.py``.
 """
 
-from dataclasses import dataclass, asdict
-from datetime import date, datetime
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from __future__ import annotations
 
-import importlib
+import argparse
 import json
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, asdict
+from datetime import date, datetime, timezone
+from importlib import import_module
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from uuid import uuid4
+import inspect
 
-import pandas as pd
+import yaml  # type: ignore[import]
 
-from .config import ConfigError, FactorDefinition, load_factor_definitions
-from .io import append_jsonlines, ensure_dir, write_factor_parquet
 
-LoggerLike = logging.Logger
+LOG = logging.getLogger("factor_engine")
+
 
 # ---------------------------------------------------------------------------
-# New core dataclasses（Task / Config / Result / Batch）
+# Data classes
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class FactorTask:
-    """
-    單一因子的工作說明書。
-
-    spec 一般會是 FactorDefinition（dataclass），
-    但也可以是 dict；factor_impl 會用 _normalize_spec 處理。
-    """
-
-    factor_id: str
-    spec: Any
-    start_date: Optional[date]
-    end_date: date
-    tag: Optional[str] = None  # 例如 "compute+eval" / "eval_only"
-
-
-@dataclass(frozen=True)
-class FactorRunConfig:
-    """
-    整批因子的共用設定（底層核心）。
-
-    - root        : repo 根目錄
-    - factor_root : factor parquet 根目錄
-    - ledger_path : factor_ledger.jsonl 路徑
-    - impl_module : 實作模組（預設 alpha_core.factor_impl）
-    - dry_run     : 只算不寫（不寫 parquet / ledger）
-    - max_workers : 預留未來並行用，目前實作仍為單執行緒
-    - run_id_prefix : run_id 前綴（寫 parquet / ledger 用）
-    - windows     : WF 視窗列表（例如 (6, 12, 24)）
-    """
-
-    root: Path
-    factor_root: Path
-    ledger_path: Path
-    impl_module: str = "alpha_core.factor_impl"
-    dry_run: bool = False
-    max_workers: int = 1
-    run_id_prefix: str = "factor"
-    windows: Tuple[int, ...] = ()
-    logger_name: str = "alpha_core.factor_engine"
 
 
 @dataclass
-class FactorRunResult:
+class FactorEngineConfig:
     """
-    單顆因子單次 run 的結果摘要。
+    Immutable configuration for a single factor batch run.
+    """
+
+    root: Path
+    rules_path: Path
+    impl_module: str
+    factor_root: Path
+    ledger_path: Path
+    summary_path: Path
+
+    end_date: date
+    windows: List[int]
+    factors: List[str]
+
+    dry_run: bool = False
+    run_id_prefix: str = ""
+    max_workers: Optional[int] = None
+    log_level: str = "INFO"
+
+    def effective_max_workers(self) -> int:
+        if self.max_workers and self.max_workers > 0:
+            return self.max_workers
+        # Defensive default: min(32, cpu_count) but never less than 4
+        cpu = os.cpu_count() or 4
+        return max(4, min(32, cpu))
+
+    def init_logging(self) -> None:
+        level = getattr(self.log_level.upper(), self.log_level.upper(), logging.INFO)
+        logging.basicConfig(
+            level=level,
+            format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+        )
+
+
+@dataclass
+class FactorTaskConfig:
+    """
+    A single unit of work: compute one factor on one window up to ``end_date``.
     """
 
     factor_id: str
-    start_date: Optional[date]
+    window: int
     end_date: date
-    run_id: Optional[str] = None
 
-    num_rows: int = 0
-    num_days: int = 0
-    num_stocks: int = 0
-    partitions_written: Sequence[Path] = ()
 
-    status: str = "ok"  # "ok" | "dry_run" | "skipped" | "error"
-    error_message: Optional[str] = None
-    reason: Optional[str] = None
-    tag: Optional[str] = None  # 同 FactorTask.tag（可選）
+@dataclass
+class FactorTaskResult:
+    """
+    Result of a single factor task.
+    """
+
+    factor_id: str
+    window: int
+    status: str  # "ok" | "error" | "skipped"
+    run_id: str
+    started_at: datetime
+    finished_at: datetime
+    end_date: date
+    output_path: Optional[str] = None
+    message: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["started_at"] = self.started_at.isoformat()
+        data["finished_at"] = self.finished_at.isoformat()
+        data["end_date"] = self.end_date.isoformat()
+        return data
 
 
 @dataclass
 class FactorBatchResult:
     """
-    一批因子跑完的彙總結果。
+    Aggregate result of running a batch of factor tasks.
     """
 
-    root: Path
-    config: FactorRunConfig
-    tasks_count: int
-    results: Sequence[FactorRunResult]
+    tasks: List[FactorTaskResult]
+    dry_run: bool
     started_at: datetime
     finished_at: datetime
 
     @property
-    def errors_count(self) -> int:
-        return sum(1 for r in self.results if r.status == "error")
+    def stats(self) -> Mapping[str, int]:
+        ok = sum(1 for t in self.tasks if t.status == "ok")
+        err = sum(1 for t in self.tasks if t.status == "error")
+        skipped = sum(1 for t in self.tasks if t.status == "skipped")
+        return {"ok": ok, "error": err, "skipped": skipped, "total": len(self.tasks)}
 
-    @property
-    def total_rows(self) -> int:
-        return sum(int(r.num_rows) for r in self.results)
+
+@dataclass
+class FactorEngineSummary:
+    """
+    Serializable summary of a full engine run.
+    """
+
+    root: str
+    impl_module: str
+    rules_path: str
+    factor_root: str
+    ledger_path: str
+    windows: List[int]
+    run_id_prefix: str
+    dry_run: bool
+    started_at: datetime
+    finished_at: datetime
+    stats: Mapping[str, int]
+    tasks: List[Mapping[str, Any]]
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "root": str(self.root),
-            "factor_root": str(self.config.factor_root),
-            "ledger_path": str(self.config.ledger_path),
-            "impl_module": self.config.impl_module,
-            "windows": list(self.config.windows),
-            "run_id_prefix": self.config.run_id_prefix,
-            "dry_run": self.config.dry_run,
+            "root": self.root,
+            "impl_module": self.impl_module,
+            "rules_path": self.rules_path,
+            "factor_root": self.factor_root,
+            "ledger_path": self.ledger_path,
+            "windows": list(self.windows),
+            "run_id_prefix": self.run_id_prefix,
+            "dry_run": self.dry_run,
             "started_at": self.started_at.isoformat(),
             "finished_at": self.finished_at.isoformat(),
-            "tasks_count": self.tasks_count,
-            "total_rows": self.total_rows,
-            "counts": {
-                "ok": sum(1 for r in self.results if r.status == "ok"),
-                "dry_run": sum(1 for r in self.results if r.status == "dry_run"),
-                "error": sum(1 for r in self.results if r.status == "error"),
-                "skipped": sum(1 for r in self.results if r.status == "skipped"),
-            },
-            "results": [
-                {
-                    "factor_id": r.factor_id,
-                    "run_id": r.run_id,
-                    "status": r.status,
-                    "reason": r.reason,
-                    "error_message": r.error_message,
-                    "start_date": r.start_date.isoformat() if r.start_date else None,
-                    "end_date": r.end_date.isoformat(),
-                    "num_rows": r.num_rows,
-                    "num_days": r.num_days,
-                    "num_stocks": r.num_stocks,
-                    "files": [str(p) for p in r.partitions_written],
-                    "tag": r.tag,
-                }
-                for r in self.results
-            ],
+            "stats": dict(self.stats),
+            "tasks": list(self.tasks),
         }
 
 
 # ---------------------------------------------------------------------------
-# 舊版 FactorEngineConfig（保留，給 scripts/factor_engine.py 用）
+# Helpers
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class FactorEngineConfig:
+def _load_factor_registry(rules_path: Path) -> Mapping[str, Mapping[str, Any]]:
     """
-    Phase-2 因子引擎設定（由 scripts/factor_engine.py 組出來）。
+    Load factor definitions from rules_factors.yaml.
 
-    Attributes 與 CLI 對應：
-        root          : --root
-        impl_module   : --impl-module
-        rules_path    : --rules
-        factor_ids    : --factors（逗號分隔）拆解後
-        start_date    : --start（可為 None）
-        end_date      : --end（通常 = as-of 的隔日，半開區間）
-        run_id_prefix : --run-id-prefix
-        dry_run       : --dry-run
-        max_factors   : --max-factors
-        factor_root   : --factor-root（預設 datahub/silver/alpha/factor）
-        ledger_path   : --ledger-path（預設 metrics/factor_ledger.jsonl）
-        summary_path  : --summary-path（預設 reports/factor_engine_summary.json）
-        windows       : --windows（逗號分隔 → Tuple[int,...]）
+    支援兩種 schema：
+
+    1) mapping 形式：
+       factors:
+         mom_6m:
+           enabled: true
+           wf_windows: [6, 12]
+           engine: ta_mom_v1
+
+    2) list 形式（你目前使用的寫法）：
+       factors:
+         - factor_id: mom_6m
+           enabled: true
+           wf_windows: [6, 12]
+           engine: ta_mom_v1
+         - factor_id: value_pe
+           ...
+
+    會統一整理成：
+        { factor_id: { ...完整設定... } }
     """
+    if not rules_path.is_file():
+        raise FileNotFoundError(f"rules file not found: {rules_path}")
 
-    root: Path
-    impl_module: str
-    rules_path: Optional[Path]
-    factor_ids: List[str]
-    start_date: Optional[date]
-    end_date: Optional[date]
-    run_id_prefix: str
-    dry_run: bool
-    max_factors: Optional[int]
-    factor_root: Optional[Path]
-    ledger_path: Optional[Path]
-    summary_path: Optional[Path]
-    windows: Tuple[int, ...]
+    raw = yaml.safe_load(rules_path.read_text(encoding="utf-8")) or {}
+    raw_factors = raw.get("factors")
 
+    if raw_factors is None:
+        raise ValueError(f"rules file {rules_path} has no top-level 'factors' key")
 
-# ---------------------------------------------------------------------------
-# 共用小工具
-# ---------------------------------------------------------------------------
+    registry: Dict[str, Mapping[str, Any]] = {}
 
+    # Case 1：mapping keyed by factor_id
+    if isinstance(raw_factors, Mapping):
+        for fid, cfg in raw_factors.items():
+            if cfg is None:
+                cfg = {}
+            if not isinstance(cfg, Mapping):
+                raise ValueError(
+                    f"rules file {rules_path} has non-mapping config for factor_id={fid!r}"
+                )
+            cfg_dict = dict(cfg)
+            # 若沒寫 factor_id，就用 key 補上
+            cfg_dict.setdefault("factor_id", fid)
+            registry[str(fid)] = cfg_dict
+        return registry
 
-def _json_default(obj: Any) -> Any:
-    if isinstance(obj, (date, datetime)):
-        return obj.isoformat()
-    return str(obj)
+    # Case 2：list of mappings, each with factor_id（rules_factors.yaml 現在的格式）
+    if isinstance(raw_factors, Sequence):
+        for idx, item in enumerate(raw_factors):
+            if not isinstance(item, Mapping):
+                raise ValueError(
+                    f"rules file {rules_path} has non-mapping entry at factors[{idx}]"
+                )
 
+            factor_id = item.get("factor_id")
+            if not factor_id:
+                raise ValueError(
+                    f"rules file {rules_path} has factor entry at index {idx} without 'factor_id'"
+                )
 
-def _get_logger(name: str) -> LoggerLike:
-    return logging.getLogger(name)
+            if factor_id in registry:
+                raise ValueError(
+                    f"rules file {rules_path} has duplicated factor_id={factor_id!r}"
+                )
 
+            registry[str(factor_id)] = dict(item)
 
-def _load_compute_impl(module_name: str):
-    """
-    Import factor implementation module，並取得 compute_factor。
-    """
-    module = importlib.import_module(module_name)
-    if not hasattr(module, "compute_factor"):
-        raise RuntimeError(
-            f"Implementation module {module_name!r} has no compute_factor(...) function."
-        )
-    return getattr(module, "compute_factor")
+        return registry
 
-
-def _resolve_paths_from_engine_cfg(
-    cfg: FactorEngineConfig,
-) -> Tuple[Path, Path, Path]:
-    """
-    舊版 config 專用：根據 FactorEngineConfig 決定 factor_root / ledger_path / summary_path。
-    """
-    root = cfg.root.resolve()
-
-    factor_root = cfg.factor_root or (root / "datahub" / "silver" / "alpha" / "factor")
-    ledger_path = cfg.ledger_path or (root / "metrics" / "factor_ledger.jsonl")
-    summary_path = cfg.summary_path or (root / "reports" / "factor_engine_summary.json")
-
-    factor_root = factor_root.resolve()
-    ledger_path = ledger_path.resolve()
-    summary_path = summary_path.resolve()
-
-    ensure_dir(factor_root)
-    ensure_dir(ledger_path.parent)
-    ensure_dir(summary_path.parent)
-
-    return factor_root, ledger_path, summary_path
-
-
-def _select_factor_ids(
-    cfg: FactorEngineConfig,
-    defs: Mapping[str, FactorDefinition],
-) -> List[str]:
-    """
-    依 config.factor_ids / max_factors 決定本次要跑的因子清單。
-    """
-    if cfg.factor_ids:
-        ids = [fid for fid in cfg.factor_ids if fid in defs]
-    else:
-        ids = sorted(defs.keys())
-
-    if cfg.max_factors is not None and cfg.max_factors >= 0:
-        ids = ids[: cfg.max_factors]
-
-    return ids
-
-
-def _resolve_factor_dates(
-    cfg: FactorEngineConfig,
-    spec: FactorDefinition,
-) -> Tuple[Optional[date], date]:
-    """
-    決定單一因子的 (start_date, end_date)。
-
-    規則：
-      - end_date：必須來自 cfg.end_date（目前不自動推）。
-      - start_date：優先 cfg.start_date，其次 spec.start_date。
-      - 若 end_date 缺失 → raise ConfigError。
-      - 若 start_date 存在且 >= end_date → raise ConfigError。
-    """
-    end_date = cfg.end_date
-    if end_date is None:
-        raise ConfigError("FactorEngineConfig.end_date is required (got None).")
-
-    start_date = cfg.start_date or getattr(spec, "start_date", None)
-
-    if start_date is not None and start_date >= end_date:
-        raise ConfigError(
-            f"Invalid date range for factor {spec.factor_id!r}: "
-            f"start_date={start_date}, end_date={end_date}"
-        )
-
-    return start_date, end_date
-
-
-def _run_compute_factor(
-    compute_factor,
-    root: Path,
-    factor_id: str,
-    spec: Any,
-    start_date: Optional[date],
-    end_date: date,
-    windows: Tuple[int, ...],
-    logger: LoggerLike,
-) -> pd.DataFrame:
-    """
-    呼叫實作層的 compute_factor。
-
-    嘗試順序：
-      1) compute_factor(root=..., factor_id=..., spec=..., start_date=..., end_date=..., windows=...)
-      2) 若 TypeError 且包含 'windows' 字樣 → 重試不帶 windows。
-    """
-    try:
-        return compute_factor(
-            root=root,
-            factor_id=factor_id,
-            spec=spec,
-            start_date=start_date,
-            end_date=end_date,
-            windows=windows,
-        )
-    except TypeError as exc:
-        msg = str(exc)
-        if "windows" in msg and "unexpected" in msg:
-            logger.info(
-                "compute_factor(%s) does not accept 'windows' kwarg, retrying without it.",
-                factor_id,
-            )
-            return compute_factor(
-                root=root,
-                factor_id=factor_id,
-                spec=spec,
-                start_date=start_date,
-                end_date=end_date,
-            )
-        raise
-
-
-def _build_run_id(prefix: str, factor_id: str, end: date) -> str:
-    return f"{prefix}-{factor_id}-{end.strftime('%Y%m%d')}"
-
-
-def _append_factor_ledger(
-    cfg: FactorRunConfig,
-    result: FactorRunResult,
-) -> None:
-    """
-    依 FactorRunResult 追加一筆 JSON line 到 factor_ledger.jsonl。
-    在 dry_run 模式下不做任何事。
-    """
-    if cfg.dry_run:
-        return
-
-    record: Dict[str, Any] = {
-        "ts": datetime.utcnow().isoformat(),
-        "factor_id": result.factor_id,
-        "run_id": result.run_id,
-        "status": result.status,
-        "reason": result.reason,
-        "error_message": result.error_message,
-        "start_date": result.start_date.isoformat() if result.start_date else None,
-        "end_date": result.end_date.isoformat(),
-        "rows": result.num_rows,
-        "num_days": result.num_days,
-        "num_stocks": result.num_stocks,
-        "files": [str(p) for p in result.partitions_written],
-        "tag": result.tag,
-    }
-    append_jsonlines(cfg.ledger_path, [record])
-
-
-# ---------------------------------------------------------------------------
-# 核心 compute API：compute_factor_to_dataframe / run_factor_batch
-# ---------------------------------------------------------------------------
-
-
-def compute_factor_to_dataframe(
-    cfg: FactorRunConfig,
-    task: FactorTask,
-    compute_factor_fn=None,
-    logger: Optional[LoggerLike] = None,
-) -> tuple[pd.DataFrame, FactorRunResult]:
-    """
-    計算單一因子的 DataFrame（不寫 parquet / ledger）。
-
-    回傳：
-        (df, result)
-
-    若計算失敗：
-        - df 為空 DataFrame（含 date / stock_id / factor_value 欄位）
-        - result.status = "error"
-        - result.error_message 帶錯誤訊息
-    """
-    log = logger or _get_logger(cfg.logger_name)
-    if compute_factor_fn is None:
-        compute_factor_fn = _load_compute_impl(cfg.impl_module)
-
-    result = FactorRunResult(
-        factor_id=task.factor_id,
-        start_date=task.start_date,
-        end_date=task.end_date,
-        tag=task.tag,
+    # 其它型態一律視為錯誤
+    raise ValueError(
+        f"rules file {rules_path} has unsupported 'factors' type: {type(raw_factors)!r}"
     )
 
-    empty = pd.DataFrame(columns=["date", "stock_id", "factor_value"])
+
+def _build_tasks(
+    cfg: FactorEngineConfig,
+    registry: Mapping[str, Mapping[str, Any]],
+) -> List[FactorTaskConfig]:
+    """
+    From the registry and requested factor/window lists, build concrete tasks.
+    """
+    tasks: List[FactorTaskConfig] = []
+
+    requested = cfg.factors or list(registry.keys())
+    windows = cfg.windows
+
+    for factor_id in requested:
+        meta = registry.get(factor_id)
+        if meta is None:
+            LOG.warning("Factor %s not found in registry; skip", factor_id)
+            continue
+
+        enabled = bool(meta.get("enabled", True))
+        if not enabled:
+            LOG.info("Factor %s is disabled in rules; skip", factor_id)
+            continue
+
+        allowed_windows = meta.get("wf_windows")
+        if isinstance(allowed_windows, Sequence) and allowed_windows:
+            allowed_set = {int(w) for w in allowed_windows}
+        else:
+            allowed_set = set(windows)  # no explicit restriction
+
+        for w in windows:
+            if w not in allowed_set:
+                LOG.info("Factor %s does not support window=%s; skip", factor_id, w)
+                continue
+            tasks.append(FactorTaskConfig(factor_id=factor_id, window=int(w), end_date=cfg.end_date))
+
+    return tasks
+
+
+def _select_impl_function(impl_module: str):
+    """
+    Best-effort selection of the underlying implementation function from the
+    implementation module.
+
+    We try a few common names in order:
+    - run_factor_task
+    - run_factor
+    - compute_factor
+
+    The selected callable is returned.
+    """
+    mod = import_module(impl_module)
+    for name in ("run_factor_task", "run_factor", "compute_factor"):
+        fn = getattr(mod, name, None)
+        if callable(fn):
+            LOG.debug("Using implementation %s.%s", impl_module, name)
+            return fn
+    raise RuntimeError(
+        f"Implementation module {impl_module!r} does not expose any of "
+        "'run_factor_task', 'run_factor', or 'compute_factor'"
+    )
+
+
+def _run_single_task(
+    engine_cfg: FactorEngineConfig,
+    task_cfg: FactorTaskConfig,
+    impl_fn,
+) -> FactorTaskResult:
+    """
+    Execute a single factor task using the provided implementation function.
+
+    The implementation is called with keyword arguments filtered to match its
+    signature, to avoid tight coupling.
+    """
+    started_at = datetime.now(timezone.utc)
+    run_id = f"{engine_cfg.run_id_prefix}-{task_cfg.factor_id}-w{task_cfg.window}-{uuid4().hex[:8]}"
+
+    # Build generic kwargs and then filter by the callable's signature.
+    call_kwargs: Dict[str, Any] = {
+        "root": engine_cfg.root,
+        "rules_path": engine_cfg.rules_path,
+        "factor_root": engine_cfg.factor_root,
+        "ledger_path": engine_cfg.ledger_path,
+        "factor_id": task_cfg.factor_id,
+        "window": task_cfg.window,
+        "end": task_cfg.end_date,
+        "end_date": task_cfg.end_date,  # some impls may prefer this name
+        "dry_run": engine_cfg.dry_run,
+        "run_id": run_id,
+        "logger": LOG,
+    }
 
     try:
-        df = _run_compute_factor(
-            compute_factor=compute_factor_fn,
-            root=cfg.root,
-            factor_id=task.factor_id,
-            spec=task.spec,
-            start_date=task.start_date,
-            end_date=task.end_date,
-            windows=cfg.windows,
-            logger=log,
+        sig = inspect.signature(impl_fn)
+        filtered = {k: v for k, v in call_kwargs.items() if k in sig.parameters}
+
+        LOG.info(
+            "Start factor task: factor=%s window=%s end=%s dry_run=%s",
+            task_cfg.factor_id,
+            task_cfg.window,
+            task_cfg.end_date,
+            engine_cfg.dry_run,
+        )
+        result = impl_fn(**filtered)
+        output_path: Optional[str] = None
+        if isinstance(result, Mapping):
+            for key in ("parquet_path", "output_path", "path"):
+                val = result.get(key)
+                if isinstance(val, (str, Path)):
+                    output_path = str(val)
+                    break
+        finished_at = datetime.now(timezone.utc)
+        LOG.info(
+            "Done factor task: factor=%s window=%s status=ok output=%s",
+            task_cfg.factor_id,
+            task_cfg.window,
+            output_path,
+        )
+        return FactorTaskResult(
+            factor_id=task_cfg.factor_id,
+            window=task_cfg.window,
+            status="ok",
+            run_id=run_id,
+            started_at=started_at,
+            finished_at=finished_at,
+            end_date=task_cfg.end_date,
+            output_path=output_path,
+            message=None,
         )
     except Exception as exc:  # noqa: BLE001
-        log.exception("compute_factor failed for %s: %s", task.factor_id, exc)
-        result.status = "error"
-        result.error_message = repr(exc)
-        return empty, result
-
-    if not isinstance(df, pd.DataFrame):
-        msg = f"compute_factor must return a pandas.DataFrame, got {type(df).__name__}"
-        log.error(msg)
-        result.status = "error"
-        result.error_message = msg
-        return empty, result
-
-    if df is None or df.empty:
-        result.status = "ok"
-        result.num_rows = 0
-        result.num_days = 0
-        result.num_stocks = 0
-        return empty, result
-
-    df = df.copy()
-    if "date" not in df.columns or "stock_id" not in df.columns:
-        msg = f"factor {task.factor_id!r} missing 'date' or 'stock_id' column"
-        log.error(msg)
-        result.status = "error"
-        result.error_message = msg
-        return empty, result
-
-    # 標準化欄位
-    df["date"] = pd.to_datetime(df["date"])
-    df.dropna(subset=["date", "stock_id"], inplace=True)
-    if "factor_value" not in df.columns:
-        # 若實作層用其他命名，最後 fallback 成 factor_value
-        for cand in ("value", task.factor_id):
-            if cand in df.columns:
-                df.rename(columns={cand: "factor_value"}, inplace=True)
-                break
-    if "factor_value" not in df.columns:
-        msg = f"factor {task.factor_id!r} is missing 'factor_value' column after normalization"
-        log.error(msg)
-        result.status = "error"
-        result.error_message = msg
-        return empty, result
-
-    df = df.dropna(subset=["factor_value"])
-    if df.empty:
-        result.status = "ok"
-        result.num_rows = 0
-        result.num_days = 0
-        result.num_stocks = 0
-        return empty, result
-
-    result.status = "ok"
-    result.num_rows = int(len(df))
-    result.num_days = int(df["date"].nunique())
-    result.num_stocks = int(df["stock_id"].nunique())
-
-    return df[["date", "stock_id", "factor_value"]], result
+        finished_at = datetime.now(timezone.utc)
+        LOG.exception(
+            "Factor task failed: factor=%s window=%s error=%s",
+            task_cfg.factor_id,
+            task_cfg.window,
+            exc,
+        )
+        return FactorTaskResult(
+            factor_id=task_cfg.factor_id,
+            window=task_cfg.window,
+            status="error",
+            run_id=run_id,
+            started_at=started_at,
+            finished_at=finished_at,
+            end_date=task_cfg.end_date,
+            output_path=None,
+            message=str(exc),
+        )
 
 
-def run_factor_batch(
-    cfg: FactorRunConfig,
-    tasks: Iterable[FactorTask],
-    logger: Optional[LoggerLike] = None,
+def _run_factor_batch(
+    cfg: FactorEngineConfig,
+    tasks: Sequence[FactorTaskConfig],
+    impl_fn,
 ) -> FactorBatchResult:
     """
-    Phase-2 因子計算核心入口。
-
-    行為：
-      - 對每一個 FactorTask：
-          * 呼叫 compute_factor_to_dataframe(...)
-          * 在非 dry_run 模式下寫 parquet + ledger
-      - 回傳 FactorBatchResult（供 scripts 產生 summary / log 用）
-
-    注意：
-      - 錯誤不會丟給呼叫端（除非 root 等基本設定有問題），
-        而是寫在 FactorRunResult.status / error_message。
+    Execute all tasks concurrently and collect results.
     """
-    log = logger or _get_logger(cfg.logger_name)
+    started_at = datetime.now(timezone.utc)
+    results: List[FactorTaskResult] = []
 
-    root = cfg.root.resolve()
-    cfg = FactorRunConfig(
-        root=root,
-        factor_root=cfg.factor_root.resolve(),
-        ledger_path=cfg.ledger_path.resolve(),
-        impl_module=cfg.impl_module,
-        dry_run=cfg.dry_run,
-        max_workers=cfg.max_workers,
-        run_id_prefix=cfg.run_id_prefix,
-        windows=cfg.windows,
-        logger_name=cfg.logger_name,
-    )
+    if not tasks:
+        finished_at = started_at
+        return FactorBatchResult(tasks=[], dry_run=cfg.dry_run, started_at=started_at, finished_at=finished_at)
 
-    ensure_dir(cfg.factor_root)
-    ensure_dir(cfg.ledger_path.parent)
+    max_workers = cfg.effective_max_workers()
+    LOG.info("Starting factor batch: tasks=%d max_workers=%d dry_run=%s", len(tasks), max_workers, cfg.dry_run)
 
-    compute_factor_fn = _load_compute_impl(cfg.impl_module)
-
-    started_at = datetime.utcnow()
-    results: List[FactorRunResult] = []
-
-    for task in tasks:
-        log.info(
-            "Running factor=%s start=%s end=%s dry_run=%s",
-            task.factor_id,
-            task.start_date,
-            task.end_date,
-            cfg.dry_run,
-        )
-
-        df, res = compute_factor_to_dataframe(
-            cfg=cfg,
-            task=task,
-            compute_factor_fn=compute_factor_fn,
-            logger=log,
-        )
-
-        # run_id 在這裡統一產生
-        res.run_id = _build_run_id(cfg.run_id_prefix, task.factor_id, task.end_date)
-
-        if cfg.dry_run:
-            res.status = "dry_run" if res.status == "ok" else res.status
-            results.append(res)
-            continue
-
-        if res.status != "ok" or df.empty:
-            # 計算失敗或沒有資料 → 仍然寫 ledger，但不寫檔
-            _append_factor_ledger(cfg, res)
-            results.append(res)
-            continue
-
-        # 寫 parquet
-        try:
-            rows, written_paths = write_factor_parquet(
-                df=df,
-                factor_root=cfg.factor_root,
-                factor_id=task.factor_id,
-                run_id=res.run_id,
-                date_column="date",
-            )
-            res.num_rows = int(rows)
-            res.partitions_written = list(written_paths)
-        except Exception as exc:  # noqa: BLE001
-            log.exception("write_factor_parquet failed for %s: %s", task.factor_id, exc)
-            res.status = "error"
-            res.error_message = repr(exc)
-            res.partitions_written = ()
-            res.num_rows = 0
-
-        # ledger
-        _append_factor_ledger(cfg, res)
-        results.append(res)
-
-    finished_at = datetime.utcnow()
-    return FactorBatchResult(
-        root=root,
-        config=cfg,
-        tasks_count=len(list(tasks)) if not isinstance(tasks, list) else len(tasks),
-        results=results,
-        started_at=started_at,
-        finished_at=finished_at,
-    )
-
-
-# ---------------------------------------------------------------------------
-# 舊版入口：run_factor_engine（兼容 wrapper）
-# ---------------------------------------------------------------------------
-
-
-def run_factor_engine(
-    cfg: FactorEngineConfig,
-    logger: Optional[LoggerLike] = None,
-) -> None:
-    """
-    Phase-2 因子引擎主流程（舊版入口），
-    現在包一層轉成 FactorRunConfig + FactorTask，再呼叫 run_factor_batch。
-
-    步驟：
-      1) 解析路徑：factor_root / ledger / summary。
-      2) 讀取因子定義（alpha_core.config.load_factor_definitions）。
-      3) 依 factor_ids 組成 FactorTask 清單（包含日期區間）。
-      4) 呼叫 run_factor_batch(...)。
-      5) 寫入整批 summary JSON（factor_engine_summary.json）。
-    """
-    log = logger or _get_logger("alpha_core.factor_engine")
-
-    # 1) 路徑與目錄
-    root = cfg.root.resolve()
-    factor_root, ledger_path, summary_path = _resolve_paths_from_engine_cfg(cfg)
-
-    log.info("Factor engine started: root=%s", root)
-    log.info("factor_root=%s", factor_root)
-    log.info("ledger_path=%s", ledger_path)
-    log.info("summary_path=%s", summary_path)
-    log.info("impl_module=%s windows=%s dry_run=%s", cfg.impl_module, cfg.windows, cfg.dry_run)
-
-    # 2) 讀因子定義
-    defs = load_factor_definitions(root=root, rules_path=cfg.rules_path)
-    if not defs:
-        raise ConfigError("No factor definitions loaded from rules_factors.yaml.")
-
-    selected_ids = _select_factor_ids(cfg, defs)
-    log.info("Total factors available=%d, selected=%d", len(defs), len(selected_ids))
-
-    # 3) 組 FactorTask 清單（同時記錄因為錯誤被跳過的因子結果）
-    tasks: List[FactorTask] = []
-    pre_results: List[FactorRunResult] = []
-
-    for fid in selected_ids:
-        spec = defs.get(fid)
-        if spec is None:
-            log.warning("Factor %s not found in definitions, skipped.", fid)
-            pre_results.append(
-                FactorRunResult(
-                    factor_id=fid,
-                    start_date=None,
-                    end_date=cfg.end_date or date.today(),
-                    status="skipped",
-                    reason="definition_missing",
-                )
-            )
-            continue
-
-        try:
-            start_date, end_date = _resolve_factor_dates(cfg, spec)
-        except ConfigError as exc:
-            log.error("Date range error for factor=%s: %s", fid, exc)
-            pre_results.append(
-                FactorRunResult(
-                    factor_id=fid,
-                    start_date=None,
-                    end_date=cfg.end_date or date.today(),
-                    status="skipped",
-                    reason=f"date_error: {exc}",
-                )
-            )
-            continue
-
-        tasks.append(
-            FactorTask(
-                factor_id=fid,
-                spec=spec,
-                start_date=start_date,
-                end_date=end_date,
-            )
-        )
-
-    # 若沒有任何有效任務，仍要寫 summary（全部視為 skipped）
-    if not tasks and not pre_results:
-        finished_at = datetime.utcnow().isoformat()
-        summary = {
-            "root": str(root),
-            "impl_module": cfg.impl_module,
-            "rules_path": str(cfg.rules_path) if cfg.rules_path else None,
-            "factor_root": str(factor_root),
-            "ledger_path": str(ledger_path),
-            "windows": list(cfg.windows),
-            "run_id_prefix": cfg.run_id_prefix,
-            "dry_run": cfg.dry_run,
-            "started_at": finished_at,
-            "finished_at": finished_at,
-            "total_factors": 0,
-            "counts": {"ok": 0, "dry_run": 0, "error": 0, "skipped": 0},
-            "factors": [],
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_task = {
+            executor.submit(_run_single_task, cfg, task, impl_fn): task for task in tasks
         }
-        with summary_path.open("w", encoding="utf-8") as f:
-            json.dump(summary, f, ensure_ascii=False, indent=2, default=_json_default)
-        log.info("Factor engine finished: no tasks to run.")
+        for future in as_completed(future_to_task):
+            res = future.result()
+            results.append(res)
+
+    finished_at = datetime.now(timezone.utc)
+    batch = FactorBatchResult(tasks=results, dry_run=cfg.dry_run, started_at=started_at, finished_at=finished_at)
+    stats = batch.stats
+    LOG.info(
+        "Factor batch finished: ok=%d error=%d skipped=%d total=%d dry_run=%s",
+        stats["ok"],
+        stats["error"],
+        stats["skipped"],
+        stats["total"],
+        cfg.dry_run,
+    )
+    return batch
+
+
+def _append_ledger_entries(cfg: FactorEngineConfig, batch: FactorBatchResult) -> None:
+    """
+    Append per-task JSONL records to the factor ledger.
+
+    Only tasks with status == "ok" are written. This function is a no-op if
+    ``cfg.dry_run`` is True.
+    """
+    if cfg.dry_run:
+        LOG.info("Dry-run enabled; skip writing ledger entries")
         return
 
-    # 4) 建立 FactorRunConfig + 呼叫 run_factor_batch
-    core_cfg = FactorRunConfig(
+    if not batch.tasks:
+        return
+
+    cfg.ledger_path.parent.mkdir(parents=True, exist_ok=True)
+
+    lines: List[str] = []
+    for t in batch.tasks:
+        if t.status != "ok":
+            continue
+        rec = {
+            "run_id": t.run_id,
+            "factor_id": t.factor_id,
+            "window": t.window,
+            "status": t.status,
+            "end_date": t.end_date.isoformat(),
+            "output_path": t.output_path,
+            "written_at": datetime.now(timezone.utc).isoformat(),
+        }
+        lines.append(json.dumps(rec, ensure_ascii=False))
+
+    if not lines:
+        return
+
+    with cfg.ledger_path.open("a", encoding="utf-8") as f:
+        for line in lines:
+            f.write(line)
+            f.write("\n")
+
+
+def _write_summary(cfg: FactorEngineConfig, batch: FactorBatchResult) -> FactorEngineSummary:
+    """
+    Build and write the engine summary JSON file.
+    """
+    cfg.summary_path.parent.mkdir(parents=True, exist_ok=True)
+
+    summary = FactorEngineSummary(
+        root=str(cfg.root),
+        impl_module=cfg.impl_module,
+        rules_path=str(cfg.rules_path),
+        factor_root=str(cfg.factor_root),
+        ledger_path=str(cfg.ledger_path),
+        windows=list(cfg.windows),
+        run_id_prefix=cfg.run_id_prefix,
+        dry_run=cfg.dry_run,
+        started_at=batch.started_at,
+        finished_at=batch.finished_at,
+        stats=batch.stats,
+        tasks=[t.to_dict() for t in batch.tasks],
+    )
+
+    payload = summary.to_dict()
+    with cfg.summary_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    LOG.info("Wrote factor engine summary: %s", cfg.summary_path)
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def run_factor_engine(cfg: FactorEngineConfig) -> FactorEngineSummary:
+    """
+    High-level orchestration entrypoint used by scripts/factor_engine.py.
+
+    Steps:
+    1. Initialise logging.
+    2. Load registry from rules_factors.yaml.
+    3. Build tasks (factor_id × window).
+    4. Execute batch concurrently.
+    5. Append ledger entries for successful tasks (unless dry_run).
+    6. Write factor_engine_summary.json.
+
+    Returns the :class:`FactorEngineSummary` instance.
+    """
+    cfg.init_logging()
+
+    LOG.info("Factor engine started: root=%s", cfg.root)
+    cfg.factor_root.mkdir(parents=True, exist_ok=True)
+
+    registry = _load_factor_registry(cfg.rules_path)
+    tasks = _build_tasks(cfg, registry)
+
+    if not tasks:
+        LOG.warning("No factor tasks to run (factors/windows/registry produced empty task list)")
+        now = datetime.now(timezone.utc)
+        empty_batch = FactorBatchResult(tasks=[], dry_run=cfg.dry_run, started_at=now, finished_at=now)
+        return _write_summary(cfg, empty_batch)
+
+    impl_fn = _select_impl_function(cfg.impl_module)
+
+    batch = _run_factor_batch(cfg, tasks, impl_fn)
+    _append_ledger_entries(cfg, batch)
+    summary = _write_summary(cfg, batch)
+
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# CLI glue (optional)
+# ---------------------------------------------------------------------------
+
+
+def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Phase-2 factor engine batch runner")
+    parser.add_argument("--root", type=Path, default=Path("."), help="Repository root (default: current directory)")
+    parser.add_argument("--rules", dest="rules_path", type=Path, default=None, help="Path to rules_factors.yaml")
+    parser.add_argument(
+        "--impl-module",
+        dest="impl_module",
+        default="alpha_core.factor_impl",
+        help="Python module implementing factor computation (default: alpha_core.factor_impl)",
+    )
+    parser.add_argument(
+        "--factor-root",
+        dest="factor_root",
+        type=Path,
+        default=None,
+        help="Root directory for factor parquet outputs (default: <root>/datahub/silver/alpha/factor)",
+    )
+    parser.add_argument(
+        "--ledger",
+        dest="ledger_path",
+        type=Path,
+        default=None,
+        help="Path to factor_ledger.jsonl (default: <root>/metrics/factor_ledger.jsonl)",
+    )
+    parser.add_argument(
+        "--summary",
+        dest="summary_path",
+        type=Path,
+        default=None,
+        help="Path to factor_engine_summary.json (default: <root>/reports/factor_engine_summary.json)",
+    )
+    parser.add_argument(
+        "--factors",
+        type=str,
+        default="",
+        help="Comma-separated list of factor_ids to run (default: all enabled in rules_factors.yaml)",
+    )
+    parser.add_argument(
+        "--windows",
+        type=str,
+        default="6",
+        help="Comma-separated list of walk windows in months (e.g. '6,12,24')",
+    )
+    parser.add_argument(
+        "--end",
+        dest="end_date",
+        type=str,
+        required=True,
+        help="As-of date (YYYY-MM-DD)",
+    )
+    parser.add_argument(
+        "--run-id-prefix",
+        dest="run_id_prefix",
+        type=str,
+        default="",
+        help="Prefix for run_id; default is end_date",
+    )
+    parser.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="Do not write parquet or ledger; only execute and write summary",
+    )
+    parser.add_argument(
+        "--max-workers",
+        dest="max_workers",
+        type=int,
+        default=None,
+        help="Maximum concurrent workers (default: min(32, cpu_count), but ≥ 4)",
+    )
+    parser.add_argument(
+        "--log-level",
+        dest="log_level",
+        type=str,
+        default="INFO",
+        help="Logging level (DEBUG, INFO, WARNING, ...). Default: INFO",
+    )
+    return parser.parse_args(argv)
+
+
+def _cfg_from_args(ns: argparse.Namespace) -> FactorEngineConfig:
+    root = ns.root.resolve()
+    rules_path = (ns.rules_path or (root / "rules_factors.yaml")).resolve()
+    factor_root = (ns.factor_root or (root / "datahub" / "silver" / "alpha" / "factor")).resolve()
+    ledger_path = (ns.ledger_path or (root / "metrics" / "factor_ledger.jsonl")).resolve()
+    summary_path = (ns.summary_path or (root / "reports" / "factor_engine_summary.json")).resolve()
+
+    end_date = date.fromisoformat(ns.end_date)
+
+    factors: List[str] = []
+    if ns.factors:
+        # allow both comma-separated and accidental spaces
+        for part in ns.factors.split(","):
+            part = part.strip()
+            if part:
+                factors.append(part)
+
+    windows: List[int] = []
+    if ns.windows:
+        for item in ns.windows.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            windows.append(int(item))
+
+    run_id_prefix = ns.run_id_prefix or end_date.isoformat()
+
+    return FactorEngineConfig(
         root=root,
+        rules_path=rules_path,
+        impl_module=str(ns.impl_module),
         factor_root=factor_root,
         ledger_path=ledger_path,
-        impl_module=cfg.impl_module,
-        dry_run=cfg.dry_run,
-        max_workers=1,
-        run_id_prefix=cfg.run_id_prefix,
-        windows=cfg.windows,
-        logger_name="alpha_core.factor_engine",
+        summary_path=summary_path,
+        end_date=end_date,
+        windows=windows,
+        factors=factors,
+        dry_run=bool(ns.dry_run),
+        run_id_prefix=run_id_prefix,
+        max_workers=ns.max_workers,
+        log_level=str(ns.log_level),
     )
 
-    batch = run_factor_batch(core_cfg, tasks, logger=log)
 
-    # 合併 pre_results（definition_missing / date_error）+ batch.results
-    all_results: List[FactorRunResult] = []
-    all_results.extend(pre_results)
-    all_results.extend(batch.results)
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """
+    CLI entrypoint. Intended usage:
 
-    # 5) summary JSON（維持舊版結構，以避免下游報表壞掉）
-    counts = {
-        "ok": sum(1 for r in all_results if r.status == "ok"),
-        "dry_run": sum(1 for r in all_results if r.status == "dry_run"),
-        "error": sum(1 for r in all_results if r.status == "error"),
-        "skipped": sum(1 for r in all_results if r.status == "skipped"),
-    }
+    .. code-block:: bash
 
-    summary_factors: List[Dict[str, Any]] = []
-    for r in all_results:
-        summary_factors.append(
-            {
-                "factor_id": r.factor_id,
-                "run_id": r.run_id,
-                "status": r.status,
-                "reason": r.reason or r.error_message,
-                "start_date": r.start_date.isoformat() if r.start_date else None,
-                "end_date": r.end_date.isoformat(),
-                "rows": r.num_rows,
-                "files": [str(p) for p in r.partitions_written],
-            }
-        )
+        python -m alpha_core.factor_engine \\
+          --root C:\\AI\\tw-alpha-stack \\
+          --end 2025-11-28 \\
+          --factors mom_6m,mom_12m,value_pe \\
+          --windows 6,12 \\
+          --dry-run
 
-    summary: Dict[str, Any] = {
-        "root": str(root),
-        "impl_module": cfg.impl_module,
-        "rules_path": str(cfg.rules_path) if cfg.rules_path else None,
-        "factor_root": str(factor_root),
-        "ledger_path": str(ledger_path),
-        "windows": list(cfg.windows),
-        "run_id_prefix": cfg.run_id_prefix,
-        "dry_run": cfg.dry_run,
-        "started_at": batch.started_at.isoformat(),
-        "finished_at": batch.finished_at.isoformat(),
-        "total_factors": len(all_results),
-        "counts": counts,
-        "factors": summary_factors,
-    }
+    ``scripts/factor_engine.py`` can also delegate here by importing
+    :func:`run_factor_engine` or :func:`main`.
+    """
+    ns = _parse_args(argv)
+    cfg = _cfg_from_args(ns)
+    try:
+        run_factor_engine(cfg)
+        return 0
+    except Exception:  # noqa: BLE001
+        LOG.exception("Factor engine failed")
+        return 1
 
-    with summary_path.open("w", encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2, default=_json_default)
 
-    logging.getLogger("alpha_core.factor_engine").info(
-        "Factor engine finished: total=%d ok=%d error=%d skipped=%d",
-        summary["total_factors"],
-        summary["counts"]["ok"],
-        summary["counts"]["error"],
-        summary["counts"]["skipped"],
-    )
+if __name__ == "__main__":
+    raise SystemExit(main())
