@@ -1,65 +1,86 @@
 # -*- coding: utf-8 -*-
 """
 alpha_core.factor_impl.vol_impl
-Optimized by Gemini (Vectorized)
+
+Volatility family (vol_20d, etc.)
+Optimized by Gemini (Vectorized Implementation)
 """
 from __future__ import annotations
-from typing import Any, Dict
-import numpy as np
 import pandas as pd
+import numpy as np
+from datetime import date
+from typing import Any, Dict
 
-def compute_realized_vol(
+def _get_price_column(df: pd.DataFrame) -> str:
+    """
+    自動偵測價格欄位。
+    優先順序: adj_close > close > Close
+    """
+    for col in ["adj_close", "close", "Close"]:
+        if col in df.columns:
+            return col
+    
+    raise KeyError(
+        f"Price column not found in input DataFrame. "
+        f"Available columns: {list(df.columns)}"
+    )
+
+def compute_volatility(
     prices: pd.DataFrame,
-    *,
     window_days: int,
 ) -> pd.DataFrame:
     """
-    向量化計算 Realized Volatility
+    計算滾動波動度 (Rolling Standard Deviation of Returns)
     """
-    if window_days <= 1:
-        raise ValueError(f"window_days must be >1, got {window_days!r}")
-
-    # 1. 準備資料與排序 (Groupby rolling 需要排序過的資料)
-    df = prices[["date", "stock_id", "adj_close"]].copy()
-    df["date"] = pd.to_datetime(df["date"])
-    df = df.sort_values(["stock_id", "date"])
-
-    # 2. 向量化計算 Log Return
-    # shift(1) 會自動在每個 group 內部運作
-    df["prev_close"] = df.groupby("stock_id")["adj_close"].shift(1)
-    
-    # 過濾無效價格 (避免 log(0) 錯誤)
-    valid_mask = (df["adj_close"] > 0) & (df["prev_close"] > 0)
-    df = df.loc[valid_mask].copy()
-    
-    df["log_ret"] = np.log(df["adj_close"] / df["prev_close"])
-
-    # 3. 向量化 Rolling Std
-    # groupby().rolling() 會產生 MultiIndex (stock_id, original_index)
-    # 我們只取需要的 series 並重設 index 對齊回原表
-    rolling_std = (
-        df.groupby("stock_id")["log_ret"]
-        .rolling(window=window_days, min_periods=window_days)
-        .std(ddof=1)
-        .reset_index(0, drop=True) # 移除 stock_id index level，對齊原 df index
-    )
-
-    df["factor_value"] = rolling_std
-
-    # 4. 清理與輸出
-    df = df.dropna(subset=["factor_value"])
-    
-    if df.empty:
+    if prices.empty:
         return pd.DataFrame(columns=["date", "stock_id", "factor_value"])
 
-    return df[["date", "stock_id", "factor_value"]].sort_values(["date", "stock_id"]).reset_index(drop=True)
+    # 1. Identify Price Column (Fix for KeyError)
+    price_col = _get_price_column(prices)
+
+    # 2. Prepare
+    df = prices[["date", "stock_id", price_col]].copy()
+    # Rename to internal standard 'adj_close'
+    df.rename(columns={price_col: "adj_close"}, inplace=True)
+
+    if not pd.api.types.is_datetime64_any_dtype(df["date"]):
+        df["date"] = pd.to_datetime(df["date"])
+    
+    df = df.sort_values(["stock_id", "date"])
+
+    # 3. Calculate Returns
+    # groupby -> pct_change
+    df["ret"] = df.groupby("stock_id")["adj_close"].pct_change()
+
+    # 4. Rolling Std
+    # min_periods 設為 window的一半，避免初期資料不足全變 NaN
+    df["vol"] = df.groupby("stock_id")["ret"].transform(
+        lambda x: x.rolling(window=window_days, min_periods=max(1, window_days // 2)).std()
+    )
+
+    # 5. Cleanup
+    df = df.dropna(subset=["vol"])
+    df = df.rename(columns={"vol": "factor_value"})
+    
+    return df[["date", "stock_id", "factor_value"]].reset_index(drop=True)
+
 
 def run_vol_factor(
     *,
     prices: pd.DataFrame,
-    params: Dict[str, Any],
+    window: int,
+    end_date: date,
+    **kwargs: Any,
 ) -> pd.DataFrame:
-    window_days = int(params.get("window_days", 0))
-    if window_days <= 1:
-        raise ValueError(f"invalid window_days={window_days!r}")
-    return compute_realized_vol(prices, window_days=window_days)
+    """
+    Phase-2 vol 引擎入口。
+    Fix: Added window, end_date arguments to match __init__.py dispatch.
+    """
+    params = kwargs
+    
+    # 預設 20 日 (約一個月)
+    default_days = 20
+    # 如果 params 有指定 lookback_days 則優先使用
+    lookback = int(params.get("lookback_days", default_days))
+    
+    return compute_volatility(prices, window_days=lookback)

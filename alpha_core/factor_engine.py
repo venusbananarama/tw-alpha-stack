@@ -80,7 +80,7 @@ class FactorEngineConfig:
         return max(4, min(32, cpu))
 
     def init_logging(self) -> None:
-        level = getattr(self.log_level.upper(), self.log_level.upper(), logging.INFO)
+        level = getattr(logging, self.log_level.upper(), logging.INFO)
         logging.basicConfig(
             level=level,
             format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
@@ -328,6 +328,7 @@ def _run_single_task(
     engine_cfg: FactorEngineConfig,
     task_cfg: FactorTaskConfig,
     impl_fn,
+    registry: Mapping[str, Mapping[str, Any]],
 ) -> FactorTaskResult:
     """
     Execute a single factor task using the provided implementation function.
@@ -337,6 +338,11 @@ def _run_single_task(
     """
     started_at = datetime.now(timezone.utc)
     run_id = f"{engine_cfg.run_id_prefix}-{task_cfg.factor_id}-w{task_cfg.window}-{uuid4().hex[:8]}"
+
+    # Fetch specific config for this factor
+    factor_cfg: Mapping[str, Any] = registry.get(task_cfg.factor_id, {}) or {}
+    rules_for_factor: Mapping[str, Any] = factor_cfg
+    params_for_factor: Mapping[str, Any] = factor_cfg.get("params") or {}
 
     # Build generic kwargs and then filter by the callable's signature.
     call_kwargs: Dict[str, Any] = {
@@ -351,6 +357,9 @@ def _run_single_task(
         "dry_run": engine_cfg.dry_run,
         "run_id": run_id,
         "logger": LOG,
+        # 新增參數以滿足 Step 1-5 需求
+        "rules": rules_for_factor,
+        "params": params_for_factor,
     }
 
     try:
@@ -367,28 +376,42 @@ def _run_single_task(
         result = impl_fn(**filtered)
         output_path: Optional[str] = None
         if isinstance(result, Mapping):
-            for key in ("parquet_path", "output_path", "path"):
+            for key in ("parquet_path", "output_path", "path", "parquet_root"):
                 val = result.get(key)
                 if isinstance(val, (str, Path)):
                     output_path = str(val)
                     break
         finished_at = datetime.now(timezone.utc)
-        LOG.info(
-            "Done factor task: factor=%s window=%s status=ok output=%s",
-            task_cfg.factor_id,
-            task_cfg.window,
-            output_path,
-        )
+        
+        status = result.get("status", "ok") if isinstance(result, Mapping) else "ok"
+        msg = result.get("reason") or result.get("error") if isinstance(result, Mapping) else None
+
+        if status == "error":
+             LOG.error(
+                "Done factor task (FAILED): factor=%s window=%s reason=%s",
+                task_cfg.factor_id,
+                task_cfg.window,
+                msg,
+            )
+        else:
+            LOG.info(
+                "Done factor task: factor=%s window=%s status=%s output=%s",
+                task_cfg.factor_id,
+                task_cfg.window,
+                status,
+                output_path,
+            )
+            
         return FactorTaskResult(
             factor_id=task_cfg.factor_id,
             window=task_cfg.window,
-            status="ok",
+            status=status,
             run_id=run_id,
             started_at=started_at,
             finished_at=finished_at,
             end_date=task_cfg.end_date,
             output_path=output_path,
-            message=None,
+            message=msg,
         )
     except Exception as exc:  # noqa: BLE001
         finished_at = datetime.now(timezone.utc)
@@ -415,6 +438,7 @@ def _run_factor_batch(
     cfg: FactorEngineConfig,
     tasks: Sequence[FactorTaskConfig],
     impl_fn,
+    registry: Mapping[str, Mapping[str, Any]],
 ) -> FactorBatchResult:
     """
     Execute all tasks concurrently and collect results.
@@ -430,8 +454,9 @@ def _run_factor_batch(
     LOG.info("Starting factor batch: tasks=%d max_workers=%d dry_run=%s", len(tasks), max_workers, cfg.dry_run)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # 傳遞 registry 給 _run_single_task
         future_to_task = {
-            executor.submit(_run_single_task, cfg, task, impl_fn): task for task in tasks
+            executor.submit(_run_single_task, cfg, task, impl_fn, registry): task for task in tasks
         }
         for future in as_completed(future_to_task):
             res = future.result()
@@ -555,7 +580,8 @@ def run_factor_engine(cfg: FactorEngineConfig) -> FactorEngineSummary:
 
     impl_fn = _select_impl_function(cfg.impl_module)
 
-    batch = _run_factor_batch(cfg, tasks, impl_fn)
+    # 傳入 registry 讓 worker 可以獲取詳細 rules
+    batch = _run_factor_batch(cfg, tasks, impl_fn, registry)
     _append_ledger_entries(cfg, batch)
     summary = _write_summary(cfg, batch)
 

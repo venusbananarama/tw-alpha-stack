@@ -1,4 +1,4 @@
-# C:\AI\tw-alpha-stack\alpha_core\io.py
+# alpha_core/io.py
 from __future__ import annotations
 
 """
@@ -8,17 +8,16 @@ alpha_core.io
 
 - 目錄建立：ensure_dir
 - yyyymm 分區：yyyymm_from_date, factor_partition_dir
-- 因子 parquet 寫入（依 yyyymm 分區，覆寫式、去重）：write_factor_parquet
+- 銀河資料讀取：load_silver_data (New!)
+- 因子 parquet 寫入：write_factor_parquet (Fix: no double factor_id nesting)
 - JSONL ledger 追加：append_jsonlines
 """
 
-from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import json
-
 import pandas as pd
 
 
@@ -28,37 +27,118 @@ import pandas as pd
 
 
 def ensure_dir(path: Path) -> None:
-    """
-    Create directory if not exists (parents=True, exist_ok=True).
-    """
+    """Create directory if not exists."""
     path.mkdir(parents=True, exist_ok=True)
 
 
 def yyyymm_from_date(d: date) -> str:
-    """
-    Convert a date to 'YYYYMM' string.
-    """
+    """Convert a date to 'YYYYMM' string."""
     return f"{d.year:04d}{d.month:02d}"
 
 
 def factor_partition_dir(factor_root: Path, factor_id: str, d: date) -> Path:
     """
-    Get factor partition directory:
-
-        <factor_root>/<factor_id>/yyyymm=YYYYMM
+    Get factor partition directory.
+    Note: Assuming factor_root is the base folder (e.g. .../alpha/factor).
+    If using this helper, ensure inputs are correct.
     """
     return factor_root / factor_id / f"yyyymm={yyyymm_from_date(d)}"
 
 
 # ---------------------------------------------------------------------------
-# Parquet 寫入（因子層用）
+# 銀河資料讀取 (Silver Reader)
+# ---------------------------------------------------------------------------
+
+
+def _daterange_to_yyyymm(start_date: date, end_date: date) -> List[str]:
+    """產生從 start_date 到 end_date 涵蓋的所有 yyyymm 字串列表。"""
+    months = []
+    # 簡單迭代：從 start 的第一天開始，每次加 32 天取下個月，直到超過 end
+    curr = date(start_date.year, start_date.month, 1)
+    # 轉成 YYYYMM int 比較比較簡單，或者用 date 比較
+    # 這裡用 date 迭代邏輯
+    while True:
+        # 當前月份加入
+        months.append(yyyymm_from_date(curr))
+        
+        # 檢查是否已經超過 end_date 的月份
+        # 產生下個月 1 號
+        next_month = curr + timedelta(days=32)
+        next_month = date(next_month.year, next_month.month, 1)
+        
+        if curr > end_date:
+            break
+        if yyyymm_from_date(curr) == yyyymm_from_date(end_date):
+            break
+            
+        curr = next_month
+    
+    return sorted(list(set(months)))
+
+
+def load_silver_data(
+    root: Path,
+    dataset: str,
+    start_date: date,
+    end_date: date,
+    columns: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """
+    從 datahub/silver/alpha/<dataset> 讀取指定日期範圍的資料。
+    
+    Returns:
+        Flat DataFrame (不設 Index)，包含 date (datetime.date) 欄位，已篩選 >= start_date 且 <= end_date。
+    """
+    silver_root = root / "datahub" / "silver" / "alpha" / dataset
+    if not silver_root.exists():
+        return pd.DataFrame()
+
+    needed_ym = _daterange_to_yyyymm(start_date, end_date)
+    frames = []
+
+    for ym in needed_ym:
+        part_dir = silver_root / f"yyyymm={ym}"
+        if not part_dir.exists():
+            continue
+            
+        for p_file in part_dir.glob("*.parquet"):
+            try:
+                # 傳入 columns 進行 IO 裁剪
+                df_part = pd.read_parquet(p_file, columns=columns)
+                if not df_part.empty:
+                    frames.append(df_part)
+            except Exception:
+                pass
+
+    if not frames:
+        return pd.DataFrame()
+
+    df_all = pd.concat(frames, ignore_index=True)
+    
+    # 標準化 date 並過濾
+    if "date" in df_all.columns:
+        # 確保轉成 datetime.date 進行比較
+        date_series = pd.to_datetime(df_all["date"], errors="coerce").dt.date
+        mask = (date_series >= start_date) & (date_series <= end_date)
+        df_all = df_all.loc[mask].copy()
+        # 確保回傳的 date column 是 object(date) 或 datetime，方便後續處理
+        # 這裡保持 original dtype 或是 datetime64
+        # 但為了 impl 方便，通常維持讀進來的 datetime64[ns]
+    
+    # 確保 stock_id 為字串
+    if "stock_id" in df_all.columns:
+        df_all["stock_id"] = df_all["stock_id"].astype(str)
+
+    return df_all.reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# Parquet 寫入
 # ---------------------------------------------------------------------------
 
 
 def _normalize_date_series(s: pd.Series) -> pd.Series:
-    """
-    把欄位轉成 datetime64[ns] 後再取 .dt.date。
-    """
+    """把欄位轉成 datetime64[ns] 後再取 .dt.date。"""
     if not pd.api.types.is_datetime64_any_dtype(s):
         s = pd.to_datetime(s, errors="raise")
     return s.dt.date
@@ -74,43 +154,52 @@ def write_factor_parquet(
     """
     依 yyyymm 分區寫入因子 parquet 檔案。
 
-    規則：
-    - 必須含有 date_column（預設 'date'）；會被轉成 datetime.date。
-    - 分區路徑：<factor_root>/<factor_id>/yyyymm=YYYYMM/data.parquet
-    - 若 data.parquet 已存在：
-        - 讀舊檔 → 與新資料 concat → drop_duplicates → 覆寫。
-    - 若原始 df 為空，不寫任何檔案，回傳 (0, []).
-
-    回傳：
-        (寫入的列數（原始 df 的列數）, [實際被觸及的檔案路徑列表])
+    Args:
+        factor_root: 因子特定目錄 (例如 .../silver/alpha/factor/mom_6m)
+        factor_id: 因子名稱 (用作 metadata 或檔名)
+    
+    Returns:
+        (rows_written, written_paths)
     """
     if df is None or df.empty:
         return 0, []
 
-    if date_column not in df.columns:
-        raise ValueError(f"DataFrame must contain column {date_column!r} for partitioning.")
+    df_to_write = df.copy()
+    # 確保是 Flat DataFrame
+    if isinstance(df_to_write.index, (pd.MultiIndex, pd.DatetimeIndex)):
+        df_to_write.reset_index(inplace=True)
 
-    df = df.copy()
+    if date_column not in df_to_write.columns:
+        raise ValueError(f"DataFrame must contain column {date_column!r}")
 
-    # 正規化 date 欄位 → datetime.date
-    df[date_column] = _normalize_date_series(df[date_column])
-    df["_yyyymm"] = df[date_column].apply(yyyymm_from_date)
+    df_to_write[date_column] = _normalize_date_series(df_to_write[date_column])
+    df_to_write["_yyyymm"] = df_to_write[date_column].apply(yyyymm_from_date)
 
     written_paths: List[Path] = []
-    total_rows = len(df)
+    total_rows = len(df_to_write)
 
-    # 一個 yyyymm 一個檔（覆寫式，保證 idempotent + 去重）
-    for yyyymm, sub in df.groupby("_yyyymm"):
-        part_dir = factor_root / factor_id / f"yyyymm={yyyymm}"
+    # 寫入邏輯：直接在 factor_root 下建立 yyyymm=...
+    for yyyymm, sub in df_to_write.groupby("_yyyymm"):
+        part_dir = factor_root / f"yyyymm={yyyymm}"
         ensure_dir(part_dir)
+        
+        # 檔名使用固定 data.parquet 方便讀取，或使用 factor_id 避免混淆
+        # 這裡採用標準 data.parquet (符合銀河 Data Lake 規範)
         path = part_dir / "data.parquet"
 
         new_data = sub.drop(columns=["_yyyymm"])
 
+        # 簡單的覆蓋邏輯 (Idempotent: 讀舊+新 -> 去重 -> 寫)
         if path.exists():
-            old = pd.read_parquet(path)
-            combined = pd.concat([old, new_data], axis=0, ignore_index=True)
-            combined = combined.drop_duplicates()
+            try:
+                old = pd.read_parquet(path)
+                combined = pd.concat([old, new_data], axis=0, ignore_index=True)
+                # 假設 date + stock_id 是 unique key
+                subset = ["date", "stock_id"] if "stock_id" in combined.columns else ["date"]
+                combined = combined.drop_duplicates(subset=subset, keep="last")
+            except Exception:
+                # 舊檔壞掉就覆蓋
+                combined = new_data
         else:
             combined = new_data
 
@@ -120,19 +209,7 @@ def write_factor_parquet(
     return total_rows, written_paths
 
 
-# ---------------------------------------------------------------------------
-# JSONL / ledger 寫入
-# ---------------------------------------------------------------------------
-
-
 def append_jsonlines(path: Path, records: Sequence[Mapping[str, Any]]) -> None:
-    """
-    Append records to a JSON Lines (jsonl) file.
-
-    - 每個 record 會被 json.dumps 後加上換行。
-    - 目錄不存在會自動建立。
-    - date / datetime 等無法直接序列化的型別，透過 default=str 處理。
-    """
     ensure_dir(path.parent)
     with path.open("a", encoding="utf-8") as f:
         for rec in records:
