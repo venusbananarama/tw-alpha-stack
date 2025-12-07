@@ -6,10 +6,13 @@ Liquidity family (liq_turnover_20d, etc.)
 Optimized by Gemini (Vectorized Implementation)
 """
 from __future__ import annotations
-import pandas as pd
-import numpy as np
 from datetime import date
 from typing import Any, Optional
+
+import numpy as np
+import pandas as pd
+
+from alpha_core.factor_xform import apply_xsection_xform
 
 def compute_turnover(
     prices: pd.DataFrame,
@@ -45,7 +48,7 @@ def compute_turnover(
 
     # 計算滾動平均成交值 (Rolling Mean Turnover)
     df["liq"] = df.groupby("stock_id")[target_col].transform(
-        lambda x: x.rolling(window=window_days, min_periods=1).mean()
+        lambda x: x.rolling(window=window_days, min_periods=max(1, window_days // 2)).mean()
     )
     
     # 取 log 避免極端值 (Log Turnover)
@@ -71,5 +74,16 @@ def run_liquidity_factor(
     """
     params = kwargs
     lookback = int(params.get("lookback_days", 20))
-    
-    return compute_turnover(prices, window_days=lookback)
+    if lookback <= 0:
+        lookback = 20
+
+    df_liq = compute_turnover(prices, window_days=lookback)
+    if df_liq.empty:
+        return df_liq
+
+    # 高流動性應該因子值大；取 log1p 後直接標準化
+    wide = df_liq.pivot(index="date", columns="stock_id", values="factor_value")
+    wide = apply_xsection_xform(wide, strategy="zscore")
+    long = wide.stack(dropna=True).reset_index()
+    long.columns = ["date", "stock_id", "factor_value"]
+    return long

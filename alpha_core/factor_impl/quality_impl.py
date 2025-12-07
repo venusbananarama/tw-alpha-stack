@@ -3,23 +3,13 @@
 alpha_core.factor_impl.quality_impl
 
 Quality factor based on ROE / ROEQ.
+Optimized by Gemini (Vectorized Implementation)
 
-設計重點：
-- 只碰「因子怎麼算」，不改任何 Gate / SLO 規則。
-- 從銀河 finstmt 資料裡找出 ROE / ROEQ 類欄位。
-- 對每個交易日做：
-    1) 去極值（winsorize）
-    2) 標準化成 z-score
-    3) 限制在 [-5, 5]
-- 回傳欄位固定為：date, stock_id, factor_value
-
-與 factor_engine 的介面：
-- 被 factor_impl.__init__ 呼叫為 run_quality_factor(...)
-- 需要支援參數：
-    * finstmt: pd.DataFrame
-    * window: int
-    * end_date: datetime.date
-    * **kwargs: 之後若想加 mode 等，可以從這裡讀
+修復重點：
+- 支援 FinMind 的 Long Format (type/value) 格式。
+- 保留原本的 Wide Format (Columns) 支援。
+- 統一執行 Winsorize -> Z-Score -> Clip 標準化流程。
+- Fix: 解決 SettingWithCopyWarning (明確使用 .copy())
 """
 
 from __future__ import annotations
@@ -38,10 +28,7 @@ import pandas as pd
 
 def _find_roe_column(df: pd.DataFrame) -> str:
     """
-    嘗試從欄位裡找出 ROE / ROEQ 類型欄位。
-
-    先用幾個常見名稱，找不到再用「名稱含 roe」的簡單 heuristics。
-    找不到就 raise，讓上層 log 出來。
+    嘗試從欄位裡找出 ROE / ROEQ 類型欄位 (用於 Wide Format)。
     """
     candidates: List[str] = [
         "roeq",
@@ -51,13 +38,14 @@ def _find_roe_column(df: pd.DataFrame) -> str:
         "ROEQ",
         "ROE_TTM",
         "ROE",
+        "ReturnOnEquity", # FinMind 標準名稱
     ]
 
     for col in candidates:
         if col in df.columns:
             return col
 
-    # fallback：只要欄位名稱裡有 "roe" 就勉強當作 ROE
+    # fallback
     for col in df.columns:
         if "roe" in col.lower():
             return col
@@ -90,32 +78,22 @@ def _winsorize_series(
 def compute_quality_from_roe(finstmt: pd.DataFrame) -> pd.DataFrame:
     """
     從 finstmt 取 ROE / ROEQ 類欄位，轉成日頻品質因子。
-
-    Input:
-        finstmt: 必須含有 date, stock_id, <roe_col>
-
-    Output:
-        DataFrame[date, stock_id, factor_value]
+    自動適應 Long Format (type/value) 與 Wide Format (columns)。
     """
     if finstmt is None or finstmt.empty:
         return pd.DataFrame(columns=["date", "stock_id", "factor_value"])
 
     df = finstmt.copy()
 
-    # 基本欄位檢查
+    # 1. 基本欄位檢查與正規化
     if "date" not in df.columns:
         raise ValueError("finstmt is missing 'date' column")
 
-    stock_col = None
-    for cand in ("stock_id", "stock", "code", "symbol"):
-        if cand in df.columns:
-            stock_col = cand
-            break
+    # 找 stock_id
+    stock_col = next((c for c in ("stock_id", "stock", "code", "symbol") if c in df.columns), None)
     if stock_col is None:
-        raise ValueError(
-            f"finstmt is missing stock-id column. columns={list(df.columns)}"
-        )
-
+        raise ValueError(f"finstmt is missing stock-id column. columns={list(df.columns)}")
+    
     if stock_col != "stock_id":
         df = df.rename(columns={stock_col: "stock_id"})
 
@@ -123,35 +101,55 @@ def compute_quality_from_roe(finstmt: pd.DataFrame) -> pd.DataFrame:
     if not pd.api.types.is_datetime64_any_dtype(df["date"]):
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
 
-    df = df.loc[df["date"].notna()].copy()
+    df = df.dropna(subset=["date"]).copy()
     if df.empty:
         return pd.DataFrame(columns=["date", "stock_id", "factor_value"])
 
-    # 找出 ROE 欄位
-    roe_col = _find_roe_column(df)
+    # 2. 資料提取 (Extraction)
+    # 分支 A: Long Format (FinMind 原始格式 - type/value)
+    if "type" in df.columns and "value" in df.columns:
+        # 定義可能的 ROE 鍵值 (FinMind 常見名稱)
+        roe_keys = ["ReturnOnEquity", "ROE", "ROEQ", "EPS"] # 優先找 ReturnOnEquity
+        
+        # 篩選 rows
+        mask = df["type"].isin(roe_keys)
+        target_df = df.loc[mask].copy()
+        
+        if target_df.empty:
+             # 若找不到 ROE，回傳空 (不報錯，視為無數據)
+             return pd.DataFrame(columns=["date", "stock_id", "factor_value"])
+        
+        # 如果有多種 type 同時存在，這裡簡單去重或取第一個
+        # 將 'value' 改名為 'raw' 以便後續處理
+        target_df = target_df.rename(columns={"value": "raw"})
+        # Fix: 加入 .copy() 避免 SettingWithCopyWarning
+        df_proc = target_df[["date", "stock_id", "raw"]].copy()
 
-    # 數值化
-    vals = pd.to_numeric(df[roe_col], errors="coerce")
-    mask = np.isfinite(vals)
-    df = df.loc[mask, ["date", "stock_id"]].copy()
-    df["raw"] = vals[mask]
+    # 分支 B: Wide Format (已轉置過的格式 - ROE 在欄位名)
+    else:
+        roe_col = _find_roe_column(df)
+        df_proc = df[["date", "stock_id", roe_col]].copy()
+        df_proc = df_proc.rename(columns={roe_col: "raw"})
 
-    if df.empty:
+    # 3. 數值處理 (Processing)
+    df_proc["raw"] = pd.to_numeric(df_proc["raw"], errors="coerce")
+    df_proc = df_proc.dropna(subset=["raw"])
+
+    if df_proc.empty:
         return pd.DataFrame(columns=["date", "stock_id", "factor_value"])
 
-    # 逐日做 winsorize + 標準化
+    # 4. 逐日標準化 (Winsorize + Z-Score)
     def _per_date_standardize(g: pd.DataFrame) -> pd.DataFrame:
         x = g["raw"]
-
-        # 1) winsorize
+        
+        # winsorize
         x_w = _winsorize_series(x)
-
-        # 2) 計算平均與標準差
+        
+        # z-score
         mean = float(x_w.mean())
         std = float(x_w.std(ddof=0))
 
         if not np.isfinite(std) or std <= 0.0:
-            # 如果這天分佈太奇怪，就全部給 0，避免發瘋
             g["factor_value"] = 0.0
         else:
             z = (x_w - mean) / std
@@ -161,7 +159,7 @@ def compute_quality_from_roe(finstmt: pd.DataFrame) -> pd.DataFrame:
         return g[["date", "stock_id", "factor_value"]]
 
     out = (
-        df.groupby("date", group_keys=False)
+        df_proc.groupby("date", group_keys=False)
         .apply(_per_date_standardize)
         .sort_values(["date", "stock_id"])
         .reset_index(drop=True)

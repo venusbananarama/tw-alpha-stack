@@ -5,10 +5,13 @@ alpha_core.factor_impl.beta_impl
 Beta family (beta_252d).
 """
 from __future__ import annotations
-import pandas as pd
-import numpy as np
 from datetime import date
 from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from alpha_core.factor_xform import apply_xsection_xform
 
 def _get_price_column(df: pd.DataFrame) -> str:
     for col in ["adj_close", "close", "Close"]:
@@ -25,8 +28,8 @@ def run_beta_factor(
 ) -> pd.DataFrame:
     """
     Phase-2 beta 引擎入口。
-    目前尚未接入大盤指數 (Benchmark)，暫以 '波動度' 作為 Beta 的代理 (Proxy)，
-    確保 Pipeline 暢通。
+    以 equal-weighted universe 報酬作為市場，計算 rolling beta，並轉成
+    low-beta style（beta 越低因子值越高）。
     """
     if prices.empty:
         return pd.DataFrame(columns=["date", "stock_id", "factor_value"])
@@ -44,16 +47,35 @@ def run_beta_factor(
     
     df = df.sort_values(["stock_id", "date"])
     
-    # 預設 252 天
+    # 預設 252 天；需要至少半窗才產生 beta
     lookback = int(kwargs.get("lookback_days", 252))
-    
-    # Proxy implementation: Rolling Volatility
+    if lookback <= 0:
+        lookback = 252
+    min_periods = max(lookback // 2, 20)
+
+    # 個股報酬
     df["ret"] = df.groupby("stock_id")["adj_close"].pct_change()
-    df["beta_proxy"] = df.groupby("stock_id")["ret"].transform(
-        lambda x: x.rolling(window=lookback, min_periods=lookback//2).std()
-    )
-    
-    df = df.dropna(subset=["beta_proxy"])
-    df = df.rename(columns={"beta_proxy": "factor_value"})
-    
-    return df[["date", "stock_id", "factor_value"]].reset_index(drop=True)
+    ret_panel = df.pivot(index="date", columns="stock_id", values="ret")
+
+    if ret_panel.empty:
+        return pd.DataFrame(columns=["date", "stock_id", "factor_value"])
+
+    # equal-weighted 市場報酬
+    mkt_ret = ret_panel.mean(axis=1, skipna=True)
+    mkt_var = mkt_ret.rolling(window=lookback, min_periods=min_periods).var()
+
+    def _rolling_beta(col: pd.Series) -> pd.Series:
+        cov = col.rolling(window=lookback, min_periods=min_periods).cov(mkt_ret)
+        beta = cov / mkt_var
+        # 轉成 low-beta：取負號
+        return -beta
+
+    beta_panel = ret_panel.apply(_rolling_beta, axis=0)
+    beta_panel = beta_panel.replace([np.inf, -np.inf], np.nan).dropna(how="all")
+    if beta_panel.empty:
+        return pd.DataFrame(columns=["date", "stock_id", "factor_value"])
+
+    beta_panel = apply_xsection_xform(beta_panel, strategy="zscore")
+    long = beta_panel.stack(dropna=True).reset_index()
+    long.columns = ["date", "stock_id", "factor_value"]
+    return long

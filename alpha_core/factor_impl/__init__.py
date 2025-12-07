@@ -10,10 +10,15 @@ Step 1-5: Real Implementation with Robust Routing & IO.
 from __future__ import annotations
 
 import logging
+# Fix: 補上 dataclass，解決 NameError
+from dataclasses import dataclass
 import pandas as pd
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
+
+# Fix: 補上 relativedelta，解決 NameError
+from dateutil.relativedelta import relativedelta
 
 from alpha_core import io as factor_io
 
@@ -53,6 +58,11 @@ try:
     from .vol_impl import run_vol_factor
 except Exception:
     run_vol_factor = None
+
+try:
+    from .ai_impl_stub import run_ai_xgb_alpha
+except Exception:
+    run_ai_xgb_alpha = None
 
 # 型別別名
 FactorImpl = Callable[..., pd.DataFrame]
@@ -435,6 +445,16 @@ def _route_and_compute(
             end_date=end_date,
             **params
         )
+    
+    # 8. AI Factors (Stub)
+    elif fid.startswith("ai_") and run_ai_xgb_alpha:
+         return run_ai_xgb_alpha(
+            # 這裡的簽名可能需要根據 ai_impl_stub 的實際情況調整
+            # 目前暫時只傳遞通用參數
+            window=window,
+            end_date=end_date,
+            **params
+         )
 
     raise NotImplementedError(f"No implementation found or loaded for factor_id={factor_id}")
 
