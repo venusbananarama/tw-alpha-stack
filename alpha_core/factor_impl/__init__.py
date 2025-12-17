@@ -35,6 +35,16 @@ except Exception:
     run_value_factor = None
 
 try:
+    from .value_impl import run_value_pe_factor
+except Exception:
+    run_value_pe_factor = None
+
+try:
+    from .value_impl import run_value_cfy_factor
+except Exception:
+    run_value_cfy_factor = None
+
+try:
     from .quality_impl import run_quality_factor
 except Exception:
     run_quality_factor = None
@@ -68,6 +78,10 @@ except Exception:
 FactorImpl = Callable[..., pd.DataFrame]
 Logger = logging.Logger
 
+# Explicit registry for exact factor_id bindings
+FACTOR_IMPL_REGISTRY: Dict[str, Optional[FactorImpl]] = {
+    "value_pe": run_value_pe_factor,
+}
 
 # ---------------------------
 # 設定：因子 → 需要的 input dataset
@@ -81,8 +95,10 @@ FACTOR_REQUIRED_INPUTS: Dict[str, List[str]] = {
     "mom_12m": ["prices"],
     # 價值
     "value_pe": ["prices", "per"],
+    "value_cfy": ["prices", "per", "cfs"],
     # 品質
     "quality_roeq": ["finstmt"],  # 或 bs/cfs，看你實作，這裡先給 finstmt
+    "quality_margin_stable": ["finstmt"],
     # 規模
     "size_log_mktcap": ["prices"],
     # beta / 波動
@@ -90,6 +106,7 @@ FACTOR_REQUIRED_INPUTS: Dict[str, List[str]] = {
     "vol_20d": ["prices"],
     # 流動性
     "liq_turnover_20d": ["prices", "shareholding"],  # 或 inst_total，看你之後怎麼接
+    "micro_imbalance_20d": ["prices"],
 }
 
 
@@ -174,6 +191,7 @@ def run_factor_task(
         "parquet_path": None,  # 成功時會填入
         "yyyymm_written": [],
         "rows": 0,
+        "files_written": 0,
         "universe_size": 0,
         "start": None,  # 實跑時會填入
         "end": end_date.isoformat(),
@@ -231,10 +249,13 @@ def run_factor_task(
         )
 
         # 準備寫入 ledger (如果 ledger_path 有提供)
+        ok = io_result["ok"]
+        note = io_result.get("note") or ""
         rows_written = io_result["rows"]
         written_files = io_result["written_files"]
+        files_written = io_result.get("files", len(written_files))
         
-        if ledger_path and rows_written > 0:
+        if ledger_path and ok and rows_written > 0:
             record = {
                 "run_id": run_id,
                 "factor_id": factor_id,
@@ -260,12 +281,26 @@ def run_factor_task(
         # parquet_path 指向這次寫入的根目錄 (雖然是 partitioned，但 engine 通常只需要 root)
         out_path = str(io_cfg.factor_root)
         
+        if not ok:
+            base_result.update({
+                "status": "error",
+                "reason": note or "write_factor_parquet_failed",
+                "parquet_root": out_path,
+                "parquet_path": out_path,
+                "yyyymm_written": sorted(io_result["yyyymm_written"]),
+                "rows": rows_written,
+                "universe_size": universe_size,
+                "files_written": files_written,
+            })
+            return base_result
+
         base_result.update({
             "status": "ok",
             "parquet_root": out_path,
             "parquet_path": out_path,
             "yyyymm_written": sorted(io_result["yyyymm_written"]),
             "rows": rows_written,
+            "files_written": files_written,
             "universe_size": universe_size,
         })
         return base_result
@@ -275,6 +310,7 @@ def run_factor_task(
         base_result.update({
             "status": "skipped",
             "reason": "not_implemented",
+            "message": f"not_implemented: {e}",
         })
         return base_result
 
@@ -374,6 +410,18 @@ def _route_and_compute(
     重點：明確傳遞 window, end_date 給 impl。
     """
     fid = factor_id.lower()
+
+    impl = FACTOR_IMPL_REGISTRY.get(fid)
+    if impl:
+        return impl(
+            per=inputs["per"],
+            cfs=inputs.get("cfs"),
+            prices=inputs.get("prices"),
+            factor_id=factor_id,
+            window=window,
+            end_date=end_date,
+            **params,
+        )
     
     # 1. Momentum Family
     if fid.startswith("mom_") and run_mom_factor:
@@ -384,14 +432,27 @@ def _route_and_compute(
             **params
         )
 
-    # 2. Value Family (PE/PB)
-    elif fid.startswith("value_") and run_value_factor:
-        return run_value_factor(
-            per=inputs["per"],
-            window=window,
-            end_date=end_date,
-            **params
-        )
+    # 2. Value Family (PE/PB/CFY)
+    elif fid.startswith("value_"):
+        if fid == "value_cfy" and run_value_cfy_factor:
+            return run_value_cfy_factor(
+                prices=inputs.get("prices"),
+                per=inputs.get("per"),
+                cfs=inputs.get("cfs"),
+                window=window,
+                end_date=end_date,
+                **params,
+            )
+        if run_value_factor:
+            return run_value_factor(
+                per=inputs["per"],
+                cfs=inputs.get("cfs"),
+                window=window,
+                end_date=end_date,
+                prices=inputs.get("prices"),
+                factor_id=factor_id,
+                **params
+            )
 
     # 3. Quality Family
     elif fid.startswith("quality_") and run_quality_factor:
@@ -407,6 +468,7 @@ def _route_and_compute(
             finstmt=finstmt,
             window=window,
             end_date=end_date,
+            factor_id=factor_id,
             **params
         )
 
@@ -446,7 +508,41 @@ def _route_and_compute(
             **params
         )
     
-    # 8. AI Factors (Stub)
+    # 8. Microstructure Family
+    elif fid.startswith("micro_"):
+        from .micro_impl import run_micro_factor
+
+        return run_micro_factor(
+            prices=inputs.get("prices"),
+            factor_id=factor_id,
+            window=window,
+            end_date=end_date,
+            **params,
+        )
+
+    # value_cfy fallback：若前述分派未命中，但 factor_id 精確為 value_cfy，直接嘗試呼叫對應 impl
+    if fid == "value_cfy" and run_value_cfy_factor:
+        return run_value_cfy_factor(
+            prices=inputs.get("prices"),
+            per=inputs.get("per"),
+            cfs=inputs.get("cfs"),
+            window=window,
+            end_date=end_date,
+            **params,
+        )
+
+    # value_cfy 專用 fallback：避免漏網到 NotImplemented
+    if fid == "value_cfy" and run_value_cfy_factor:
+        return run_value_cfy_factor(
+            prices=inputs.get("prices"),
+            per=inputs.get("per"),
+            cfs=inputs.get("cfs"),
+            window=window,
+            end_date=end_date,
+            **params,
+        )
+
+    # 9. AI Factors (Stub)
     elif fid.startswith("ai_") and run_ai_xgb_alpha:
          return run_ai_xgb_alpha(
             # 這裡的簽名可能需要根據 ai_impl_stub 的實際情況調整
@@ -469,12 +565,19 @@ def _write_factor_parquet(
     將因子結果依 yyyymm 分區寫入 parquet。
     回傳寫入統計。
     """
-    rows_written, written_files = factor_io.write_factor_parquet(
+    io_result = factor_io.write_factor_parquet(
         df=df_factor,
         factor_root=cfg.factor_root,
         factor_id=cfg.factor_id,
         run_id=run_id,
     )
+
+    rows_written = io_result["rows_written"]
+    written_paths_str = io_result["written_paths"]
+    written_files = [Path(p) for p in written_paths_str]
+    files_written = io_result["files_written"]
+    ok = io_result["ok"]
+    note = io_result["note"]
     
     yyyymm_written = []
     if written_files:
@@ -483,7 +586,10 @@ def _write_factor_parquet(
         yyyymm_written = sorted(list({p.parent.name.split('=')[-1] for p in written_files}))
 
     return {
+        "ok": ok,
+        "note": note,
         "rows": rows_written,
+        "files": files_written,
         "written_files": written_files,
         "yyyymm_written": yyyymm_written,
     }
