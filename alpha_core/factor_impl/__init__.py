@@ -565,12 +565,49 @@ def _write_factor_parquet(
     將因子結果依 yyyymm 分區寫入 parquet。
     回傳寫入統計。
     """
-    io_result = factor_io.write_factor_parquet(
+    io_result_raw = factor_io.write_factor_parquet(
         df=df_factor,
         factor_root=cfg.factor_root,
         factor_id=cfg.factor_id,
         run_id=run_id,
     )
+
+    # Normalize tuple/list/dict into a dict contract used below
+    if isinstance(io_result_raw, dict):
+        io_result = io_result_raw
+    elif isinstance(io_result_raw, (tuple, list)):
+        # tuple shapes:
+        # (rows_written, written_paths)
+        # (rows_written, written_paths, files_written)
+        # (rows_written, written_paths, files_written, ok)
+        # (rows_written, written_paths, files_written, ok, note)
+        rows_written = int(io_result_raw[0]) if len(io_result_raw) >= 1 else 0
+        paths = io_result_raw[1] if len(io_result_raw) >= 2 else []
+        if isinstance(paths, str):
+            written_paths = [paths]
+        elif isinstance(paths, (list, tuple)):
+            written_paths = [str(p) for p in paths]
+        else:
+            written_paths = []
+        files_written = io_result_raw[2] if len(io_result_raw) >= 3 else len(written_paths)
+        ok = io_result_raw[3] if len(io_result_raw) >= 4 else True
+        note = io_result_raw[4] if len(io_result_raw) >= 5 else ""
+        io_result = {
+            "rows_written": rows_written,
+            "written_paths": written_paths,
+            "files_written": files_written,
+            "ok": ok,
+            "note": note,
+        }
+    else:
+        # Fallback: wrap scalar into dict
+        io_result = {
+            "rows_written": int(io_result_raw) if isinstance(io_result_raw, int) else 0,
+            "written_paths": [],
+            "files_written": 0,
+            "ok": True,
+            "note": "",
+        }
 
     rows_written = io_result["rows_written"]
     written_paths_str = io_result["written_paths"]
