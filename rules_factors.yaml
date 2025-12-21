@@ -393,7 +393,15 @@ factors:
       Uses turnover_rate-like column from silver prices, with rolling mean over window_days.
       若 turnover_rate 缺失，未來可改為 volume-based proxy；目前若關鍵欄位不存在則回傳空（dev-safe）。
     params:
-      window_days: 20
+      turnover_lookback_days: 20
+      transform: log1p
+      winsor_pctl: 0.01
+      zscore: true
+      neutralize_with: size_log_mktcap
+      neutralize_method: ols
+      neutralize_group: date
+      direction: illiquid
+      min_obs_per_day: 50
     wf_windows: [6, 12, 24]
     gate_rules:
       min_rank_ic: 0.010
@@ -411,6 +419,12 @@ factors:
     impl_notes: >
       Non-alpha style factor (size); implementation uses log(market_cap) from silver prices.
       若 market_cap-like 欄位尚未接好，則 engine 回傳空（dev-safe），不會阻塞整體 pipeline。
+    params:
+      lag_trading_days: 0
+      smooth_days: 0
+      winsor_pctl: 0.0
+      zscore: false
+      transform: null
     wf_windows: [12, 24]
     gate_rules:
       min_rank_ic: 0.005
