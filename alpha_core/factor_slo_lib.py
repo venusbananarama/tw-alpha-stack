@@ -277,6 +277,25 @@ def _normalize_factor_map(factors_node: Any) -> Dict[str, Mapping[str, Any]]:
     return result
 
 
+def extract_passed_factors(wf_summary: Mapping[str, Any]) -> Dict[str, Mapping[str, Any]]:
+    """
+    Extract passed factors from wf_summary, preferring canonical factors_by_status.passed.
+
+    Returns a mapping factor_id -> dict-like payload.
+    """
+    fbs = wf_summary.get("factors_by_status")
+    if isinstance(fbs, Mapping):
+        passed_node = fbs.get("passed")
+        if passed_node is not None:
+            return _normalize_factor_map(passed_node)
+
+    factors_node = wf_summary.get("factors")
+    if isinstance(factors_node, Mapping) and "passed" in factors_node:
+        return _normalize_factor_map(factors_node.get("passed"))
+
+    return _normalize_factor_map(factors_node)
+
+
 def _infer_windows_from_slo_and_wf(
     slo: FactorSloConfig,
     wf: Mapping[str, Any],
@@ -338,9 +357,8 @@ def evaluate_factor_slo(
     in the returned FactorSloResult.satisfied flag. Callers can decide how
     to react (e.g., log-only, or fail Gate).
     """
-    # Normalize factors
-    factors_node = wf_summary.get("factors")
-    factor_map = _normalize_factor_map(factors_node)
+    # Normalize factors (passed only)
+    factor_map = extract_passed_factors(wf_summary)
     factor_ids = sorted(factor_map.keys())
     total_factors = len(factor_ids)
 
