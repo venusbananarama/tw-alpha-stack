@@ -40,6 +40,7 @@ from uuid import uuid4
 import inspect
 
 import yaml  # type: ignore[import]
+from alpha_core.io import load_factor_panel
 
 
 LOG = logging.getLogger("factor_engine")
@@ -96,6 +97,8 @@ class FactorTaskConfig:
     factor_id: str
     window: int
     end_date: date
+    requested_windows: List[int]
+    supported_windows: Optional[List[int]] = None
 
 
 @dataclass
@@ -106,11 +109,16 @@ class FactorTaskResult:
 
     factor_id: str
     window: int
+    requested_windows: List[int]
+    supported_windows: Optional[List[int]]
+    compute_window_used: Optional[int]
     status: str  # "ok" | "error" | "skipped"
     run_id: str
     started_at: datetime
     finished_at: datetime
     end_date: date
+    deps: List[str]
+    deps_loaded_ok: Mapping[str, bool]
     output_path: Optional[str] = None
     message: Optional[str] = None
 
@@ -262,6 +270,32 @@ def _load_factor_registry(rules_path: Path) -> Mapping[str, Mapping[str, Any]]:
     )
 
 
+def select_compute_window(
+    requested_windows: Sequence[int],
+    supported_windows: Optional[Sequence[int]],
+) -> Optional[int]:
+    """
+    Select a single compute window to avoid overwriting outputs across windows.
+
+    Rules:
+      - If requested_windows is empty -> None
+      - If supported_windows is None/empty -> max(requested_windows)
+      - Else take intersection; if empty -> None; else max(intersection)
+    """
+    req = [int(w) for w in requested_windows if w is not None]
+    if not req:
+        return None
+
+    if not supported_windows:
+        return max(req)
+
+    sup = {int(w) for w in supported_windows}
+    inter = [w for w in req if w in sup]
+    if not inter:
+        return None
+    return max(inter)
+
+
 def _build_tasks(
     cfg: FactorEngineConfig,
     registry: Mapping[str, Mapping[str, Any]],
@@ -285,17 +319,32 @@ def _build_tasks(
             LOG.info("Factor %s is disabled in rules; skip", factor_id)
             continue
 
-        allowed_windows = meta.get("wf_windows")
-        if isinstance(allowed_windows, Sequence) and allowed_windows:
-            allowed_set = {int(w) for w in allowed_windows}
+        supported_windows_raw = meta.get("wf_windows")
+        supported_windows: Optional[List[int]]
+        if isinstance(supported_windows_raw, Sequence) and supported_windows_raw:
+            supported_windows = [int(w) for w in supported_windows_raw]
         else:
-            allowed_set = set(windows)  # no explicit restriction
+            supported_windows = None  # 全視為支援
 
-        for w in windows:
-            if w not in allowed_set:
-                LOG.info("Factor %s does not support window=%s; skip", factor_id, w)
-                continue
-            tasks.append(FactorTaskConfig(factor_id=factor_id, window=int(w), end_date=cfg.end_date))
+        compute_window = select_compute_window(windows, supported_windows)
+        if compute_window is None:
+            LOG.info(
+                "Factor %s has no overlapping windows with requested=%s supported=%s; skip",
+                factor_id,
+                windows,
+                supported_windows,
+            )
+            continue
+
+        tasks.append(
+            FactorTaskConfig(
+                factor_id=factor_id,
+                window=int(compute_window),
+                end_date=cfg.end_date,
+                requested_windows=[int(w) for w in windows],
+                supported_windows=list(supported_windows) if supported_windows is not None else None,
+            )
+        )
 
     return tasks
 
@@ -343,8 +392,54 @@ def _run_single_task(
     factor_cfg: Mapping[str, Any] = registry.get(task_cfg.factor_id, {}) or {}
     rules_for_factor: Mapping[str, Any] = factor_cfg
     params_for_factor: Mapping[str, Any] = factor_cfg.get("params") or {}
+    params_for_factor = dict(params_for_factor)
 
     # Build generic kwargs and then filter by the callable's signature.
+    # parse dependencies from params.neutralize_with
+    def _extract_deps(raw: Any) -> List[str]:
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            return [raw]
+        from collections.abc import Iterable as _Iterable
+
+        if isinstance(raw, _Iterable) and not isinstance(raw, (bytes, bytearray)):
+            out: List[str] = []
+            for v in raw:
+                try:
+                    s = str(v).strip()
+                except Exception:
+                    continue
+                if s:
+                    out.append(s)
+            return out
+        return []
+
+    deps = _extract_deps(params_for_factor.get("neutralize_with"))
+    deps_loaded: Dict[str, bool] = {}
+    aux_panels: Dict[str, Any] = {}
+
+    # Load dependent factor panels (if any), fail-fast on missing
+    for dep_id in deps:
+        try:
+            panel = load_factor_panel(
+                factor_root=engine_cfg.factor_root,
+                factor_id=dep_id,
+                as_of=task_cfg.end_date,
+                window_months=task_cfg.window,
+            )
+            aux_panels[dep_id] = panel
+            deps_loaded[dep_id] = True
+        except Exception as exc:  # noqa: BLE001
+            deps_loaded[dep_id] = False
+            raise RuntimeError(
+                f"failed to load dependency factor={dep_id} for {task_cfg.factor_id} "
+                f"as_of={task_cfg.end_date} window={task_cfg.window}: {exc}"
+            ) from exc
+
+    if aux_panels:
+        params_for_factor["_aux_factor_panels"] = aux_panels
+
     call_kwargs: Dict[str, Any] = {
         "root": engine_cfg.root,
         "rules_path": engine_cfg.rules_path,
@@ -405,11 +500,16 @@ def _run_single_task(
         return FactorTaskResult(
             factor_id=task_cfg.factor_id,
             window=task_cfg.window,
+            requested_windows=task_cfg.requested_windows,
+            supported_windows=task_cfg.supported_windows,
+            compute_window_used=task_cfg.window,
             status=status,
             run_id=run_id,
             started_at=started_at,
             finished_at=finished_at,
             end_date=task_cfg.end_date,
+            deps=deps,
+            deps_loaded_ok=deps_loaded,
             output_path=output_path,
             message=msg,
         )
@@ -424,11 +524,16 @@ def _run_single_task(
         return FactorTaskResult(
             factor_id=task_cfg.factor_id,
             window=task_cfg.window,
+            requested_windows=task_cfg.requested_windows,
+            supported_windows=task_cfg.supported_windows,
+            compute_window_used=task_cfg.window,
             status="error",
             run_id=run_id,
             started_at=started_at,
             finished_at=finished_at,
             end_date=task_cfg.end_date,
+            deps=deps,
+            deps_loaded_ok=deps_loaded,
             output_path=None,
             message=str(exc),
         )

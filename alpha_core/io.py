@@ -45,6 +45,87 @@ def factor_partition_dir(factor_root: Path, factor_id: str, d: date) -> Path:
     return factor_root / factor_id / f"yyyymm={yyyymm_from_date(d)}"
 
 
+def load_factor_panel(
+    factor_root: Path,
+    factor_id: str,
+    as_of: date,
+    window_months: int,
+) -> pd.DataFrame:
+    """
+    Load factor panel from parquet for dependency injection.
+
+    Args:
+        factor_root: base path of factor outputs (.../alpha/factor)
+        factor_id: dependency factor id (e.g., size_log_mktcap)
+        as_of: end date (inclusive)
+        window_months: window in months; used to approximate lookback span
+
+    Returns:
+        DataFrame with columns at least date, stock_id, factor_value.
+
+    Raises:
+        FileNotFoundError / ValueError with context on missing/empty data.
+    """
+    # Approximate start date by months (~32 days per month)
+    approx_days = max(1, int(window_months) * 32)
+    start_date = as_of - timedelta(days=approx_days)
+
+    factor_dir = factor_root / factor_id
+    if not factor_dir.exists():
+        raise FileNotFoundError(
+            f"factor panel not found: factor_id={factor_id} dir={factor_dir} as_of={as_of} window_months={window_months}"
+        )
+
+    parts = _daterange_to_yyyymm(start_date, as_of)
+    frames: List[pd.DataFrame] = []
+    for ym in parts:
+        part_dir = factor_dir / f"yyyymm={ym}"
+        if not part_dir.exists():
+            continue
+        for p in part_dir.glob("*.parquet"):
+            try:
+                df_part = pd.read_parquet(p)
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    f"failed to read parquet {p} for factor_id={factor_id} as_of={as_of} window_months={window_months}: {exc}"
+                ) from exc
+            frames.append(df_part)
+
+    if not frames:
+        raise FileNotFoundError(
+            f"no parquet partitions for factor_id={factor_id} in {factor_dir} covering yyyymm={parts} as_of={as_of} window_months={window_months}"
+        )
+
+    df = pd.concat(frames, ignore_index=True)
+    if "date" not in df.columns:
+        raise ValueError(
+            f"factor_id={factor_id} parquet missing 'date' column as_of={as_of} window_months={window_months}"
+        )
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df[df["date"].notna()]
+    df = df[df["date"] <= pd.Timestamp(as_of)]
+    df = df[df["date"] >= pd.Timestamp(start_date)]
+
+    if df.empty:
+        raise ValueError(
+            f"factor_id={factor_id} panel empty after filtering to start={start_date} end={as_of} window_months={window_months}"
+        )
+
+    if "stock_id" in df.columns:
+        df["stock_id"] = df["stock_id"].astype(str)
+
+    # Normalize factor_value column
+    if "factor_value" not in df.columns:
+        if "value" in df.columns:
+            df = df.rename(columns={"value": "factor_value"})
+        else:
+            raise ValueError(
+                f"factor_id={factor_id} panel missing factor_value column as_of={as_of} window_months={window_months}"
+            )
+
+    return df.reset_index(drop=True)[["date", "stock_id", "factor_value"]]
+
+
 # ---------------------------------------------------------------------------
 # 銀河資料讀取 (Silver Reader)
 # ---------------------------------------------------------------------------
