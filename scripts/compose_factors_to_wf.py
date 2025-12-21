@@ -253,6 +253,105 @@ def _has_any_gate_rule(gr: GateRulesView) -> bool:
     return False
 
 
+def _normalize_coverage_block(block: Dict[str, Any]) -> None:
+    """
+    Normalize coverage-related metrics into a stable contract:
+      - coverage / coverage_ratio: ratio in [0, 1] or None
+      - coverage_count           : optional integer count (if provided)
+      - sample_days              : integer or None
+
+    If coverage is clearly a count (>1) and coverage_count not provided, we keep it
+    in coverage_count and clear coverage_ratio to avoid mixing semantics.
+    """
+    if not isinstance(block, Mapping):
+        return
+
+    def _clamp_ratio(val: Any) -> Optional[float]:
+        if val is None:
+            return None
+        try:
+            v = float(val)
+        except (TypeError, ValueError):
+            return None
+        return max(0.0, min(v, 1.0))
+
+    coverage_ratio: Optional[float] = None
+    coverage_count: Optional[int] = None
+
+    cov_raw = block.get("coverage")
+    cov_ratio_raw = block.get("coverage_ratio")
+    cov_count_raw = block.get("coverage_count")
+
+    if isinstance(cov_ratio_raw, (int, float)):
+        coverage_ratio = _clamp_ratio(cov_ratio_raw)
+
+    if isinstance(cov_count_raw, (int, float)):
+        try:
+            coverage_count = int(cov_count_raw)
+        except (TypeError, ValueError):
+            coverage_count = None
+
+    if isinstance(cov_raw, (int, float)):
+        if cov_raw > 1 and coverage_count is None:
+            # Treat as count, leave ratio unset
+            coverage_count = int(cov_raw)
+        elif cov_raw <= 1 and coverage_ratio is None:
+            coverage_ratio = _clamp_ratio(cov_raw)
+
+    sample_days_raw = block.get("sample_days")
+    sample_days = 0
+    if isinstance(sample_days_raw, (int, float)):
+        try:
+            sample_days = int(sample_days_raw)
+        except (TypeError, ValueError):
+            sample_days = 0
+    sample_days = max(sample_days, 0)
+
+    # If sample_days is zero/None, wipe all metrics to avoid contradictions
+    if sample_days == 0:
+        coverage_ratio = None
+        coverage_count = None
+        for key in (
+            "ic",
+            "rank_ic",
+            "ic_mean",
+            "ic_std",
+            "rank_ic_mean",
+            "rank_ic_std",
+            "psr",
+            "dsr",
+            "turnover",
+            "max_corr",
+        ):
+            if key in block:
+                block[key] = None
+
+    block["coverage_ratio"] = coverage_ratio
+    block["coverage_count"] = coverage_count
+    block["coverage"] = coverage_ratio
+    block["sample_days"] = sample_days
+
+
+def _normalize_eval_metrics(eval_obj: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize coverage/sample_days metrics across overall and per-window blocks.
+    """
+    if not isinstance(eval_obj, dict):
+        return eval_obj
+
+    overall = eval_obj.get("overall")
+    if isinstance(overall, dict):
+        _normalize_coverage_block(overall)
+
+    windows_block = eval_obj.get("windows")
+    if isinstance(windows_block, Mapping):
+        for win_val in windows_block.values():
+            if isinstance(win_val, dict):
+                _normalize_coverage_block(win_val)
+
+    return eval_obj
+
+
 def factor_passes_basic_gate(
     cfg: FactorConfigView,
     eval_obj: Mapping[str, Any],
@@ -490,6 +589,8 @@ def compose_factors_to_wf(
             skipped += 1
             continue
 
+        eval_obj = _normalize_eval_metrics(eval_obj)
+
         verdict = factor_passes_basic_gate(cfg, eval_obj, wf_windows=wf_windows)
 
         if verdict is True:
@@ -512,13 +613,25 @@ def compose_factors_to_wf(
         mode,
     )
 
-    # 4) 更新 wf_summary factors 區塊
-    wf_summary["factors"] = new_factors
-    if mode == "all":
-        wf_summary["factor_candidates"] = new_candidates
-    else:
-        # factors_only：移除 factor_candidates，Gate 只看到通過門檻的因子
-        wf_summary.pop("factor_candidates", None)
+    # 4) canonical factors_by_status
+    canonical = {
+        "passed": dict(new_factors),
+        "candidates": dict(new_candidates) if mode == "all" else {},
+        "skipped": {},
+    }
+    wf_summary["factors_by_status"] = canonical
+
+    # 5) legacy mirrors (must stay identical)
+    wf_summary["factors"] = dict(canonical)
+    wf_summary["factor_candidates"] = dict(canonical["candidates"])
+
+    # 6) fail-fast consistency checks
+    if wf_summary.get("factors_by_status") != canonical:
+        raise ValueError("wf_summary.factors_by_status is not identical to canonical layout")
+    if wf_summary.get("factors") != canonical:
+        raise ValueError("wf_summary.factors is not identical to canonical factors_by_status")
+    if wf_summary.get("factor_candidates", {}) != canonical["candidates"]:
+        raise ValueError("wf_summary.factor_candidates is not identical to canonical candidates")
 
     # 5) 依 gate_ready 設定計算 SLO，寫入 wf_summary["factor_slo"]
     if load_factor_slo_config is not None and evaluate_factor_slo is not None:

@@ -48,8 +48,11 @@ class WindowMetrics:
     dsr: Optional[float] = None
     turnover: Optional[float] = None
     coverage: Optional[float] = None
+    coverage_ratio: Optional[float] = None
+    coverage_count: Optional[float] = None
     max_corr: Optional[float] = None
     max_dd: Optional[float] = None
+    sample_days: Optional[int] = None
 
     # 過渡期兼容欄位（舊版可能使用 *_mean）
     rank_ic_mean: Optional[float] = None
@@ -320,7 +323,8 @@ def _compute_daily_stats(df: pd.DataFrame) -> pd.DataFrame:
     對每個 date 計算：
       - ic        : Pearson corr(factor_value, target_return)
       - rank_ic   : Spearman corr
-      - coverage  : 橫斷面樣本數
+      - coverage_ratio: 有效樣本占比
+      - coverage_count: 橫斷面有效樣本數
     """
     df = df.copy()
     df["date"] = pd.to_datetime(df["date"])
@@ -328,38 +332,41 @@ def _compute_daily_stats(df: pd.DataFrame) -> pd.DataFrame:
     records: List[Dict[str, Any]] = []
 
     for dt, g in df.groupby("date", as_index=False):
+        base_n = len(g)
+        g = g.dropna(subset=["factor_value", "target_return"])
         n = len(g)
+        coverage_ratio = float(n / base_n) if base_n > 0 else 0.0
+        coverage_ratio = max(0.0, min(coverage_ratio, 1.0))
+        coverage_count = int(n)
+
         if n < 2:
-            records.append(
-                {
-                    "date": dt,
-                    "ic": np.nan,
-                    "rank_ic": np.nan,
-                    "coverage": n,
-                }
-            )
-            continue
-
-        x = g["factor_value"].astype("float64")
-        y = g["target_return"].astype("float64")
-
-        ic = x.corr(y)
-
-        rx = x.rank(method="average")
-        ry = y.rank(method="average")
-        rank_ic = rx.corr(ry)
+            ic = np.nan
+            rank_ic = np.nan
+        else:
+            x = g["factor_value"].astype("float64")
+            y = g["target_return"].astype("float64")
+            # 常數列視為無效
+            if x.nunique(dropna=True) <= 1 or y.nunique(dropna=True) <= 1:
+                ic = np.nan
+                rank_ic = np.nan
+            else:
+                ic = x.corr(y)
+                rx = x.rank(method="average")
+                ry = y.rank(method="average")
+                rank_ic = rx.corr(ry)
 
         records.append(
             {
                 "date": dt,
                 "ic": float(ic) if ic is not None else np.nan,
                 "rank_ic": float(rank_ic) if rank_ic is not None else np.nan,
-                "coverage": int(n),
+                "coverage_ratio": coverage_ratio,
+                "coverage_count": coverage_count,
             }
         )
 
     if not records:
-        return pd.DataFrame(columns=["date", "ic", "rank_ic", "coverage"])
+        return pd.DataFrame(columns=["date", "ic", "rank_ic", "coverage_ratio", "coverage_count"])
 
     out = pd.DataFrame.from_records(records)
     out["date"] = pd.to_datetime(out["date"])
@@ -377,16 +384,20 @@ def _aggregate_window(
 
     這裡用粗略換算：1 個月 ≈ 21 交易日。
     """
-    if daily.empty:
+    def _empty_window() -> Dict[str, Any]:
         return {
             "ic_mean": None,
             "ic_std": None,
             "rank_ic_mean": None,
             "rank_ic_std": None,
-            "coverage_mean": None,
-            "coverage_min": None,
+            "coverage_ratio": None,
+            "coverage": None,
+            "coverage_count": None,
             "sample_days": 0,
         }
+
+    if daily.empty:
+        return _empty_window()
 
     as_of_ts = pd.to_datetime(as_of)
     approx_days = int(21 * window_months)
@@ -394,15 +405,7 @@ def _aggregate_window(
 
     win = daily.loc[(daily["date"] > start_ts) & (daily["date"] <= as_of_ts)].copy()
     if win.empty:
-        return {
-            "ic_mean": None,
-            "ic_std": None,
-            "rank_ic_mean": None,
-            "rank_ic_std": None,
-            "coverage_mean": None,
-            "coverage_min": None,
-            "sample_days": 0,
-        }
+        return _empty_window()
 
     def _m(series: pd.Series) -> Optional[float]:
         s = series.dropna()
@@ -416,14 +419,26 @@ def _aggregate_window(
             return None
         return float(s.std(ddof=1)) if len(s) > 1 else 0.0
 
+    # 僅以有效 ic/rank_ic 的天數作為 sample_days
+    valid_mask = win["rank_ic"].notna() | win["ic"].notna()
+    sample_days = int(valid_mask.sum())
+    if sample_days == 0:
+        return _empty_window()
+
+    coverage_ratio = _m(win["coverage_ratio"])
+    if coverage_ratio is not None:
+        coverage_ratio = max(0.0, min(coverage_ratio, 1.0))
+    coverage_count_mean = _m(win["coverage_count"])
+
     return {
         "ic_mean": _m(win["ic"]),
         "ic_std": _s(win["ic"]),
         "rank_ic_mean": _m(win["rank_ic"]),
         "rank_ic_std": _s(win["rank_ic"]),
-        "coverage_mean": _m(win["coverage"]),
-        "coverage_min": int(win["coverage"].min()) if not win["coverage"].empty else None,
-        "sample_days": int(len(win)),
+        "coverage_ratio": coverage_ratio,
+        "coverage": coverage_ratio,
+        "coverage_count": coverage_count_mean,
+        "sample_days": sample_days,
     }
 
 
@@ -471,6 +486,22 @@ def _compute_factor_metrics(
         key = str(w_int)
         agg = _aggregate_window(daily, window_months=w_int, as_of=as_of_ts)
 
+        sample_days = agg.get("sample_days") or 0
+        if sample_days <= 0:
+            metrics_by_window[key] = {
+                "ic": None,
+                "ic_mean": None,
+                "ic_std": None,
+                "rank_ic": None,
+                "rank_ic_mean": None,
+                "rank_ic_std": None,
+                "coverage": None,
+                "coverage_ratio": None,
+                "coverage_count": None,
+                "sample_days": 0,
+            }
+            continue
+
         # 只填我們目前真的算出來的欄位，其餘維持 None
         metrics_by_window[key] = {
             "ic": agg["ic_mean"],
@@ -479,7 +510,10 @@ def _compute_factor_metrics(
             "rank_ic": agg["rank_ic_mean"],
             "rank_ic_mean": agg["rank_ic_mean"],
             "rank_ic_std": agg["rank_ic_std"],
-            "coverage": agg["coverage_mean"],
+            "coverage": agg["coverage"],
+            "coverage_ratio": agg.get("coverage_ratio", agg["coverage"]),
+            "coverage_count": agg.get("coverage_count"),
+            "sample_days": sample_days,
         }
 
     return metrics_by_window, as_of_ts.date()
