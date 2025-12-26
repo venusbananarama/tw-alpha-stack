@@ -197,7 +197,7 @@ corr_spec:
 engines:
   classic:
     description: "Rule-based / TA-style factors computed from silver prices/chip/per/dividend."
-    wf_windows: [6, 12]
+    wf_windows: [6, 12, 24]
   ai:
     description: "ML-based / XGBoost-style factors trained on historical alpha pool."
     wf_windows: [12, 24]
@@ -247,11 +247,11 @@ factors:
     impl_notes: "Standard 12M momentum with 1M skip; implementation uses trading_days calendar and log-returns."
     params:
       lookback_days: 252
-    wf_windows: [6]
+    wf_windows: [6, 12, 24]
     gate_rules:
       # 開發階段：先只用 min_rank_ic + min_coverage 做基本 gate。
       # turnover / max_corr 之後等 eval / corr 指標補齊再啟用。
-      min_rank_ic: 0.02
+      min_rank_ic: 0.03
       min_coverage: 0.90
       # max_turnover: 0.30   # TODO: enable when turnover is available in factor_eval
       # max_corr: 0.70       # TODO: enable when corr_summary is wired into gating
@@ -288,7 +288,7 @@ factors:
     impl_notes: "Realized volatility computed from daily log-returns; engine uses rolling std with min_periods=window_days."
     params:
       window_days: 20
-    wf_windows: [6, 24]
+    wf_windows: [6, 12, 24]
     gate_rules:
       min_rank_ic: 0.015
       min_coverage: 0.95
@@ -402,7 +402,7 @@ factors:
       neutralize_group: date
       direction: illiquid
       min_obs_per_day: 50
-    wf_windows: [24]
+    wf_windows: [6, 12, 24]
     gate_rules:
       min_rank_ic: 0.010
       min_coverage: 0.95
