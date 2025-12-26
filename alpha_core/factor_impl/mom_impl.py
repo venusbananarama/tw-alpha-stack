@@ -8,7 +8,7 @@ Optimized by Gemini (Vectorized Implementation)
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 
 import numpy as np
@@ -20,9 +20,9 @@ from alpha_core.factor_xform import apply_xsection_xform
 def _get_price_column(df: pd.DataFrame) -> str:
     """
     自動偵測價格欄位。
-    優先順序: adj_close > close > Close
+    優先順序: adj_close > close > Close > price
     """
-    for col in ["adj_close", "close", "Close"]:
+    for col in ["adj_close", "close", "Close", "price"]:
         if col in df.columns:
             return col
 
@@ -55,29 +55,33 @@ def compute_momentum(
     df = prices[["date", "stock_id", price_col]].copy()
     df.rename(columns={price_col: "adj_close"}, inplace=True)
 
-    if not pd.api.types.is_datetime64_any_dtype(df["date"]):
-        df["date"] = pd.to_datetime(df["date"])
+    df["date"] = pd.to_datetime(df["date"])
+    df["adj_close"] = pd.to_numeric(df["adj_close"], errors="coerce")
 
-    # 僅保留 end_date 以前的資料，並排除最近 skip_recent_days
-    cutoff = pd.to_datetime(end_date) - timedelta(days=skip_recent_days)
-    df = df[df["date"] <= cutoff]
+    # 去重後升序，避免對齊錯位；使用 stable sort 保持 deterministic
+    df = df.sort_values(["stock_id", "date"], ascending=[True, True], kind="mergesort")
+    df = df.drop_duplicates(subset=["stock_id", "date"], keep="last")
 
-    # 依個股檢查歷史長度；不足則整檔剔除
+    # 價格需為正；非正值視為 NaN，但保留日期以維持交易日 shift
+    df.loc[df["adj_close"] <= 0, "adj_close"] = np.nan
+
+    # 最小歷史長度（以 unique 日期計，禁止用 count）
+    if min_history_days <= 0:
+        min_history_days = skip_recent_days + lookback_days + 1
     if min_history_days > 0:
-        counts = df.groupby("stock_id")["date"].transform("count")
-        df = df[counts >= min_history_days]
-
-    df = df.sort_values(["stock_id", "date"])
-
-    df["past_price"] = df.groupby("stock_id")["adj_close"].shift(lookback_days)
-
-    valid_mask = (df["adj_close"] > 0) & (df["past_price"] > 0)
-    df = df.loc[valid_mask].copy()
+        nunq = df.groupby("stock_id")["date"].nunique()
+        df = df[df["stock_id"].map(nunq) >= min_history_days]
 
     if df.empty:
         return pd.DataFrame(columns=["date", "stock_id", "factor_value"])
 
-    df["factor_value"] = np.log(df["adj_close"] / df["past_price"])
+    # 交易日 shift（不是日曆 cutoff）
+    df["log_price"] = np.log(df["adj_close"])
+    df["factor_value"] = (
+        df.groupby("stock_id")["log_price"].shift(skip_recent_days)
+        - df.groupby("stock_id")["log_price"].shift(skip_recent_days + lookback_days)
+    )
+    df = df.dropna(subset=["factor_value"])
 
     return df[["date", "stock_id", "factor_value"]].reset_index(drop=True)
 
@@ -249,10 +253,36 @@ def run_mom_factor(
         long.columns = ["date", "stock_id", "factor_value"]
         return long
 
-    # 一般 mom_6m：固定 lookback 為 126 交易日，排除最近 21 天雜訊
-    lookback_days = 126
-    skip_recent_days = int(params.get("skip_recent_days", 21))
-    min_history_days = int(params.get("min_history_days", lookback_days + 63))
+    # mom：以 factor_id 優先決定 lookback（避免把 WF window 當成 lookback）
+    fid = str(params.get("factor_id") or "").strip().lower()
+    if "lookback_days" in params:
+        try:
+            lookback_days = int(params.get("lookback_days", 0))
+        except Exception:
+            lookback_days = 0
+    else:
+        if fid == "mom_12m" or fid.endswith("12m"):
+            lookback_days = 252
+        elif fid == "mom_6m" or fid.endswith("6m"):
+            lookback_days = 126
+        else:
+            lookback_days = 126 if window <= 6 else 252
+    if lookback_days <= 0:
+        lookback_days = 126 if window <= 6 else 252
+
+    if "skip_recent_days" in params:
+        skip_recent_days = int(params.get("skip_recent_days", 0))
+    else:
+        skip_recent_days = 21 if lookback_days >= 252 else 0
+
+    min_history_param = params.get("min_history_days")
+    if min_history_param is not None:
+        try:
+            min_history_days = int(min_history_param)
+        except Exception:
+            min_history_days = 0
+    else:
+        min_history_days = 0
 
     df_mom = compute_momentum(
         prices,

@@ -10,7 +10,11 @@ import numpy as np
 from datetime import date
 from typing import Any, Optional
 
-from alpha_core.factor_xform import apply_xsection_xform, winsorize_by_quantile
+from alpha_core.factor_xform import apply_xsection_xform, winsorize_xsection
+
+
+def winsorize_by_quantile(series: pd.Series, q: float = 0.01) -> pd.Series:
+    return winsorize_xsection(series, lower_q=q, upper_q=1.0 - q)
 
 def run_size_factor(
     *,
@@ -50,7 +54,8 @@ def run_size_factor(
     if target is None:
         return pd.DataFrame(columns=["date", "stock_id", "factor_value"])
 
-    df["factor_value"] = np.log(target)
+    target = target.where(target > 0)
+    df["factor_value"] = -np.log(target)
     
     # 清洗 Inf/-Inf
     df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=["factor_value"])

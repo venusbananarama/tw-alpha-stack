@@ -92,6 +92,7 @@ class FactorConfigView:
     factor_id: str
     enabled: bool
     gate_rules: GateRulesView
+    wf_windows: Tuple[int, ...]
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +135,7 @@ def load_registry(root: Path, rules_file: Path) -> Tuple[Any, Dict[str, FactorCo
             factor_id=cfg.factor_id,
             enabled=bool(getattr(cfg, "enabled", True)),
             gate_rules=gr_view,
+            wf_windows=tuple(getattr(cfg, "wf_windows", ()) or ()),
         )
 
     logger.info(
@@ -352,6 +354,56 @@ def _normalize_eval_metrics(eval_obj: Dict[str, Any]) -> Dict[str, Any]:
     return eval_obj
 
 
+def _resolve_factor_windows(
+    cfg: FactorConfigView,
+    wf_windows: Sequence[int],
+) -> List[int]:
+    """
+    For per-factor gating, only consider:
+      declared wf_windows in rules_factors.yaml    CLI --wf-windows
+    If the factor does not declare wf_windows, fall back to CLI wf_windows.
+    """
+    declared = getattr(cfg, "wf_windows", ()) or ()
+    if not declared:
+        return [int(w) for w in wf_windows]
+
+    declared_set = {int(w) for w in declared if isinstance(w, (int, str))}
+    out: List[int] = []
+    seen: set[int] = set()
+    for w in wf_windows:
+        try:
+            win = int(w)
+        except (TypeError, ValueError):
+            continue
+        if win in declared_set and win not in seen:
+            out.append(win)
+            seen.add(win)
+    return out
+
+
+def _filter_eval_windows(
+    eval_obj: Dict[str, Any],
+    wf_windows: Sequence[int],
+) -> Dict[str, Any]:
+    """
+    Filter eval_obj["windows"] to only keep keys in wf_windows.
+    This prevents extra windows (e.g., "6") from affecting gating and wf_summary output.
+    """
+    windows_block = eval_obj.get("windows")
+    if not isinstance(windows_block, Mapping):
+        return eval_obj
+
+    keep = {str(w) for w in wf_windows}
+    filtered: Dict[str, Any] = {k: v for k, v in windows_block.items() if str(k) in keep}
+
+    if filtered == windows_block:
+        return eval_obj
+
+    new_obj = dict(eval_obj)
+    new_obj["windows"] = filtered
+    return new_obj
+
+
 def factor_passes_basic_gate(
     cfg: FactorConfigView,
     eval_obj: Mapping[str, Any],
@@ -557,6 +609,7 @@ def compose_factors_to_wf(
 
     new_factors: Dict[str, Any] = {}
     new_candidates: Dict[str, Any] = {}
+    new_skipped: Dict[str, Any] = {}
 
     updated_pass = 0
     updated_candidate = 0
@@ -591,7 +644,22 @@ def compose_factors_to_wf(
 
         eval_obj = _normalize_eval_metrics(eval_obj)
 
-        verdict = factor_passes_basic_gate(cfg, eval_obj, wf_windows=wf_windows)
+        effective_windows = _resolve_factor_windows(cfg, wf_windows)
+        if not effective_windows:
+            eval_obj = _filter_eval_windows(eval_obj, effective_windows)
+            new_skipped[factor_id] = eval_obj
+            skipped += 1
+            logger.info(
+                "Skipping factor=%s due to empty effective_windows (declared=%s, requested=%s)",
+                factor_id,
+                list(cfg.wf_windows),
+                list(wf_windows),
+            )
+            continue
+
+        eval_obj = _filter_eval_windows(eval_obj, effective_windows)
+
+        verdict = factor_passes_basic_gate(cfg, eval_obj, wf_windows=effective_windows)
 
         if verdict is True:
             new_factors[factor_id] = eval_obj
@@ -617,7 +685,7 @@ def compose_factors_to_wf(
     canonical = {
         "passed": dict(new_factors),
         "candidates": dict(new_candidates) if mode == "all" else {},
-        "skipped": {},
+        "skipped": dict(new_skipped),
     }
     wf_summary["factors_by_status"] = canonical
 

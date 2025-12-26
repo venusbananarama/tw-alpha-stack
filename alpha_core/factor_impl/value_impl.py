@@ -403,9 +403,9 @@ def compute_value_pe(
     df.loc[df["pe_raw"] <= min_pe, "pe_raw"] = np.nan
     df.loc[df["pe_raw"] >= max_pe, "pe_raw"] = np.nan
 
-    # 1 / PE：越便宜 → 值越大
-    # 注意：這裡只對正 PE 取倒數，負 PE 已經在上面被設為 NaN
-    df["value_raw"] = 1.0 / (df["pe_raw"] + eps)
+    # -log(PE)：越便宜 → 分數越高，且縮小極端值影響
+    # 注意：這裡只對正 PE 計算，非正值已在上面被設為 NaN
+    df["value_raw"] = -np.log(df["pe_raw"] + eps)
 
     # 依 date 做 winsor + z-score
     df["factor_value"] = (

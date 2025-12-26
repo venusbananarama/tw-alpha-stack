@@ -81,6 +81,7 @@ Logger = logging.Logger
 # Explicit registry for exact factor_id bindings
 FACTOR_IMPL_REGISTRY: Dict[str, Optional[FactorImpl]] = {
     "value_pe": run_value_pe_factor,
+    "size_log_mktcap": run_size_factor,
 }
 
 # ---------------------------
@@ -414,7 +415,7 @@ def _route_and_compute(
     impl = FACTOR_IMPL_REGISTRY.get(fid)
     if impl:
         return impl(
-            per=inputs["per"],
+            per=inputs.get("per"),
             cfs=inputs.get("cfs"),
             prices=inputs.get("prices"),
             factor_id=factor_id,
@@ -445,7 +446,7 @@ def _route_and_compute(
             )
         if run_value_factor:
             return run_value_factor(
-                per=inputs["per"],
+                per=inputs.get("per"),
                 cfs=inputs.get("cfs"),
                 window=window,
                 end_date=end_date,
@@ -476,6 +477,7 @@ def _route_and_compute(
     elif fid.startswith("liq_") and run_liquidity_factor:
         return run_liquidity_factor(
             prices=inputs["prices"],
+            shareholding=inputs.get("shareholding"),
             window=window,
             end_date=end_date,
             **params
@@ -500,13 +502,22 @@ def _route_and_compute(
         )
 
     # 7. Size Family
-    elif fid.startswith("size_") and run_size_factor:
-        return run_size_factor(
-            prices=inputs["prices"],
-            window=window,
-            end_date=end_date,
-            **params
-        )
+    elif fid.startswith("size_"):
+        impl = run_size_factor
+        if impl is None:
+            try:
+                from .size_impl import run_size_factor as _run_size_factor
+            except Exception:
+                _run_size_factor = None
+            impl = _run_size_factor
+
+        if impl:
+            return impl(
+                prices=inputs["prices"],
+                window=window,
+                end_date=end_date,
+                **params
+            )
     
     # 8. Microstructure Family
     elif fid.startswith("micro_"):

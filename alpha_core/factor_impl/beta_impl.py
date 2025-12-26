@@ -96,10 +96,13 @@ def run_beta_factor(
 
     # Params with defaults
     direction = str(kwargs.get("direction", "low")).lower()
-    beta_window = int(kwargs.get("beta_window_days", 252))
+    beta_window = int(kwargs.get("window_days", kwargs.get("beta_window_days", 252)))
     if beta_window <= 0:
         beta_window = 252
-    min_obs = int(kwargs.get("min_obs", 200))
+    min_obs = int(kwargs.get("min_obs", kwargs.get("min_periods", 0)))
+    if min_obs <= 0:
+        min_obs = max(60, int(round(beta_window * 0.8)))
+    min_obs = min(min_obs, beta_window)
     winsor_p = float(kwargs.get("winsor_p", 0.01))
     market_mode = str(kwargs.get("market_mode", "ew")).lower()
 
@@ -120,10 +123,9 @@ def run_beta_factor(
     df.loc[df["adj_close"] <= 0, "adj_close"] = np.nan
 
     price_wide = df.pivot(index="date", columns="stock_id", values="adj_close").sort_index()
-    ret_panel = price_wide.pct_change()
+    log_px = _finite_df(np.log(price_wide))
+    ret_panel = log_px.diff()
     ret_inf_count_total, ret_inf_ratio_total = _ratio_inf(ret_panel)
-    ret_panel = _finite_df(ret_panel)
-    ret_panel = ret_panel.shift(1)
     ret_panel = _finite_df(ret_panel)
     ret_panel = ret_panel.dropna(how="all")
 
