@@ -276,6 +276,22 @@ factors:
       # max_corr: 0.75       # TODO: enable when corr_summary is wired into gating
     enabled: true
 
+  - factor_id: mom_3m
+    category: classic
+    description: "3-month price momentum (skip last month) on investable universe."
+    universe: tw_eq_investable
+    data_freq: daily
+    engine: ta_mom_v1
+    impl_notes: "Same momentum engine as mom_6m/mom_12m; shorter lookback for roster fill and 6m window support."
+    params:
+      lookback_days: 63
+      skip_recent_days: 21
+    wf_windows: [6, 12, 24]
+    gate_rules:
+      min_rank_ic: 0.02
+      min_coverage: 0.90
+    enabled: true
+
   # -------------------------------------------------------------------------
   # Volatility / Risk family
   # -------------------------------------------------------------------------
@@ -294,6 +310,36 @@ factors:
       min_coverage: 0.95
       # max_turnover: 0.25   # TODO: enable when turnover is available in factor_eval
       # max_corr: 0.70       # TODO: enable when corr_summary is wired into gating
+    enabled: true
+
+  - factor_id: vol_60d
+    category: classic
+    description: "60-day realized volatility (inverse risk factor when used as low-vol)."
+    universe: tw_eq_investable
+    data_freq: daily
+    engine: ta_vol_v1
+    impl_notes: "Longer-window volatility using the same engine as vol_20d."
+    params:
+      window_days: 60
+    wf_windows: [6, 12, 24]
+    gate_rules:
+      min_rank_ic: 0.015
+      min_coverage: 0.95
+    enabled: true
+
+  - factor_id: vol_120d
+    category: classic
+    description: "120-day realized volatility (inverse risk factor when used as low-vol)."
+    universe: tw_eq_investable
+    data_freq: daily
+    engine: ta_vol_v1
+    impl_notes: "Longer-window volatility using the same engine as vol_20d/vol_60d."
+    params:
+      window_days: 120
+    wf_windows: [6, 12, 24]
+    gate_rules:
+      min_rank_ic: 0.015
+      min_coverage: 0.95
     enabled: true
 
   - factor_id: beta_252d
@@ -408,6 +454,50 @@ factors:
       min_coverage: 0.95
       # max_turnover: 0.15   # TODO: enable when turnover is available in factor_eval
       # max_corr: 0.80       # TODO: enable when corr_summary is wired into gating
+    enabled: true
+
+  - factor_id: adv_20d
+    category: classic
+    description: "20-day average daily value traded (ADV); transformed to illiquid proxy."
+    universe: tw_eq_investable
+    data_freq: daily
+    engine: microstructure_v1
+    impl_notes: >
+      Prices-based liquidity proxy. Use Trading_money (or equivalent) to compute ADV(20d).
+      Output is an illiquid-oriented signal (e.g., -log1p(ADV)) to target positive rank-IC.
+    params:
+      window_days: 20
+      direction: illiquid
+      transform: log1p
+    wf_windows: [6, 12, 24]
+    gate_rules:
+      min_rank_ic: 0.010
+      min_coverage: 0.95
+    enabled: true
+
+  - factor_id: amihud_20d
+    category: classic
+    description: "20-day Amihud illiquidity (|ret| / dollar volume) with log1p transform."
+    universe: tw_eq_investable
+    data_freq: daily
+    engine: microstructure_v1
+    impl_notes: >
+      Amihud illiquidity computed from daily returns and dollar volume.
+      Uses Trading_money when available, else close*volume proxy; transformed via log1p.
+    params:
+      window_days: 20
+      transform: log1p
+      winsor_pctl: 0.01
+      zscore: true
+      neutralize_with: size_log_mktcap
+      neutralize_method: ols
+      neutralize_group: date
+      direction: illiquid
+      min_obs_per_day: 50
+    wf_windows: [6, 12, 24]
+    gate_rules:
+      min_rank_ic: 0.010
+      min_coverage: 0.95
     enabled: true
 
   - factor_id: size_log_mktcap

@@ -82,6 +82,8 @@ Logger = logging.Logger
 FACTOR_IMPL_REGISTRY: Dict[str, Optional[FactorImpl]] = {
     "value_pe": run_value_pe_factor,
     "size_log_mktcap": run_size_factor,
+    "adv_20d": run_liquidity_factor,
+    "amihud_20d": run_liquidity_factor,
 }
 
 # ---------------------------

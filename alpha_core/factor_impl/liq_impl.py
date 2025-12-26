@@ -212,6 +212,153 @@ def compute_turnover(
     return df[["date", "stock_id", "factor_value"]].reset_index(drop=True)
 
 
+def compute_adv(
+    prices: pd.DataFrame,
+    window_days: int,
+    *,
+    transform: str = "log1p",
+    value_field_candidates: Optional[list[str]] = None,
+) -> pd.DataFrame:
+    if prices.empty:
+        return pd.DataFrame(columns=["date", "stock_id", "factor_value"])
+
+    df = prices.copy()
+    if not pd.api.types.is_datetime64_any_dtype(df["date"]):
+        df["date"] = pd.to_datetime(df["date"])
+
+    cols = df.columns
+    if value_field_candidates:
+        candidates = [str(c).strip() for c in value_field_candidates if str(c).strip()]
+    else:
+        candidates = [
+            "Trading_money",
+            "Trading_Money",
+            "trading_money",
+            "turnover_value",
+            "Trading_turnover",
+            "turnover",
+        ]
+
+    target_col = None
+    for cand in candidates:
+        if cand in cols:
+            target_col = cand
+            break
+
+    if target_col is None and "close" in cols and "volume" in cols:
+        df["adv_proxy"] = pd.to_numeric(df["close"], errors="coerce") * pd.to_numeric(
+            df["volume"], errors="coerce"
+        )
+        target_col = "adv_proxy"
+    elif target_col is None and "adj_close" in cols and "volume" in cols:
+        df["adv_proxy"] = pd.to_numeric(df["adj_close"], errors="coerce") * pd.to_numeric(
+            df["volume"], errors="coerce"
+        )
+        target_col = "adv_proxy"
+
+    if target_col is None:
+        return pd.DataFrame(columns=["date", "stock_id", "factor_value"])
+
+    df = df.sort_values(["stock_id", "date"])
+    df[target_col] = pd.to_numeric(df[target_col], errors="coerce")
+    df.loc[df[target_col] <= 0, target_col] = np.nan
+
+    min_periods = max(1, window_days // 2)
+    df["adv"] = df.groupby("stock_id")[target_col].transform(
+        lambda x: x.rolling(window=window_days, min_periods=min_periods).mean()
+    )
+
+    adv = df["adv"]
+    if transform == "log1p":
+        adv = adv.where(adv > 0)
+        df["factor_value"] = np.log1p(adv)
+    elif transform == "log":
+        adv = adv.where(adv > 0)
+        df["factor_value"] = np.log(adv)
+    elif transform in ("inv", "inverse"):
+        adv = adv.where(adv > 0)
+        df["factor_value"] = 1.0 / adv
+    else:
+        df["factor_value"] = adv
+
+    df = df.dropna(subset=["factor_value"])
+    return df[["date", "stock_id", "factor_value"]].reset_index(drop=True)
+
+
+def compute_amihud(
+    prices: pd.DataFrame,
+    window_days: int,
+    *,
+    transform: str = "log1p",
+) -> pd.DataFrame:
+    if prices.empty:
+        return pd.DataFrame(columns=["date", "stock_id", "factor_value"])
+
+    df = prices.copy()
+    if not pd.api.types.is_datetime64_any_dtype(df["date"]):
+        df["date"] = pd.to_datetime(df["date"])
+
+    cols = df.columns
+    price_cols = ("adj_close", "close", "Close", "price")
+    price_col = next((c for c in price_cols if c in cols), None)
+    if price_col is None:
+        return pd.DataFrame(columns=["date", "stock_id", "factor_value"])
+
+    df = df.sort_values(["stock_id", "date"])
+    df = df.drop_duplicates(subset=["stock_id", "date"], keep="last")
+
+    price = pd.to_numeric(df[price_col], errors="coerce")
+    price = price.where(price > 0)
+    df["log_price"] = np.log(price)
+    df["ret"] = df.groupby("stock_id")["log_price"].diff()
+
+    money_cols = ("Trading_money", "Trading_Money", "trading_money")
+    money_col = next((c for c in money_cols if c in cols), None)
+    if money_col is not None:
+        dollar_volume = pd.to_numeric(df[money_col], errors="coerce")
+    else:
+        volume_cols = ("volume", "Volume", "Trading_Volume", "Trading_volume", "trading_volume")
+        volume_col = next((c for c in volume_cols if c in cols), None)
+        if volume_col is None:
+            return pd.DataFrame(columns=["date", "stock_id", "factor_value"])
+
+        if "close" in cols:
+            price_for_dollar = pd.to_numeric(df["close"], errors="coerce")
+        elif "adj_close" in cols:
+            price_for_dollar = pd.to_numeric(df["adj_close"], errors="coerce")
+        elif "Close" in cols:
+            price_for_dollar = pd.to_numeric(df["Close"], errors="coerce")
+        else:
+            price_for_dollar = pd.to_numeric(df[price_col], errors="coerce")
+
+        dollar_volume = price_for_dollar * pd.to_numeric(df[volume_col], errors="coerce")
+
+    dollar_volume = dollar_volume.where(dollar_volume > 0)
+    df["illiq"] = df["ret"].abs() / dollar_volume
+    df["illiq"] = df["illiq"].replace([np.inf, -np.inf], np.nan)
+
+    min_periods = max(1, window_days // 2)
+    df["amihud"] = df.groupby("stock_id")["illiq"].transform(
+        lambda x: x.rolling(window=window_days, min_periods=min_periods).mean()
+    )
+
+    amihud = df["amihud"]
+    if transform == "log1p":
+        amihud = amihud.where(amihud > 0)
+        df["factor_value"] = np.log1p(amihud)
+    elif transform == "log":
+        amihud = amihud.where(amihud > 0)
+        df["factor_value"] = np.log(amihud)
+    elif transform in ("inv", "inverse"):
+        amihud = amihud.where(amihud > 0)
+        df["factor_value"] = 1.0 / amihud
+    else:
+        df["factor_value"] = amihud
+
+    df = df.dropna(subset=["factor_value"])
+    return df[["date", "stock_id", "factor_value"]].reset_index(drop=True)
+
+
 def run_liquidity_factor(
     *,
     prices: pd.DataFrame,
@@ -227,7 +374,14 @@ def run_liquidity_factor(
     Fix: Added window, end_date arguments to match __init__.py dispatch.
     """
     params = kwargs
-    lookback = int(params.get("turnover_lookback_days", params.get("lookback_days", 20)))
+    factor_id = str(params.get("factor_id") or "").strip().lower()
+    is_adv = factor_id == "adv_20d"
+    is_amihud = factor_id == "amihud_20d"
+
+    if is_adv or is_amihud:
+        lookback = int(params.get("window_days", params.get("lookback_days", 20)))
+    else:
+        lookback = int(params.get("turnover_lookback_days", params.get("lookback_days", 20)))
     if lookback <= 0:
         lookback = 20
 
@@ -237,20 +391,37 @@ def run_liquidity_factor(
     min_obs_per_day = int(params.get("min_obs_per_day", 50))
     direction = str(params.get("direction", "illiquid")).lower()
 
-    shareholding_df = shareholding
-    if shareholding_df is None and isinstance(params.get("shareholding"), pd.DataFrame):
-        shareholding_df = params.get("shareholding")
-    if shareholding_df is None and isinstance(params.get("_aux_factor_panels"), dict):
-        aux_share = params.get("_aux_factor_panels", {}).get("shareholding")
-        if isinstance(aux_share, pd.DataFrame):
-            shareholding_df = aux_share
+    if is_adv:
+        value_field_candidates = params.get("value_field_candidates")
+        if not isinstance(value_field_candidates, (list, tuple, set)):
+            value_field_candidates = None
+        df_liq = compute_adv(
+            prices,
+            window_days=lookback,
+            transform=transform,
+            value_field_candidates=value_field_candidates,
+        )
+    elif is_amihud:
+        df_liq = compute_amihud(
+            prices,
+            window_days=lookback,
+            transform=transform,
+        )
+    else:
+        shareholding_df = shareholding
+        if shareholding_df is None and isinstance(params.get("shareholding"), pd.DataFrame):
+            shareholding_df = params.get("shareholding")
+        if shareholding_df is None and isinstance(params.get("_aux_factor_panels"), dict):
+            aux_share = params.get("_aux_factor_panels", {}).get("shareholding")
+            if isinstance(aux_share, pd.DataFrame):
+                shareholding_df = aux_share
 
-    df_liq = compute_turnover(
-        prices,
-        window_days=lookback,
-        transform=transform,
-        shareholding=shareholding_df,
-    )
+        df_liq = compute_turnover(
+            prices,
+            window_days=lookback,
+            transform=transform,
+            shareholding=shareholding_df,
+        )
     if df_liq.empty:
         return df_liq
 
@@ -330,11 +501,12 @@ def run_liquidity_factor(
 
     # direction handling: illiquid => larger values mean less liquid
     is_inverse = transform in ("inv", "inverse")
+    illiquid_native = is_amihud
     if direction == "illiquid":
-        if not is_inverse:
+        if not is_inverse and not illiquid_native:
             long["factor_value"] = -long["factor_value"]
     elif direction == "liquid":
-        if is_inverse:
+        if is_inverse or illiquid_native:
             long["factor_value"] = -long["factor_value"]
 
     return long
