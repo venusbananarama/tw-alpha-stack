@@ -59,6 +59,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+class InsufficientFactorsError(RuntimeError):
+    pass
+
+
 @dataclass
 class FactorCorrJob:
     """
@@ -161,6 +165,21 @@ def parse_windows_arg(windows_str: str) -> List[int]:
             raise ValueError(f"Window months must be positive, got {value}")
         windows.append(value)
     return windows
+
+
+def parse_factors_arg(factors_str: str) -> List[str]:
+    """
+    將 'a,b,c' parse 成 ['a', 'b', 'c']，並去重保持順序。
+    """
+    parts = [p.strip() for p in factors_str.split(",") if p.strip()]
+    if not parts:
+        raise ValueError("factors string is empty")
+    return list(dict.fromkeys(parts))
+
+
+def _is_insufficient_panel_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "no usable factor series" in msg or "no parquet data found" in msg
 
 
 def window_label_for_months(months: int) -> str:
@@ -379,10 +398,32 @@ def run_corr_job(job: FactorCorrJob) -> None:
     frame = _load_input_frame(job.input_path)
     logger.info("loaded input frame: shape=%s from %s", frame.shape, job.input_path)
 
+    selected_columns = None
+    if job.columns is not None:
+        requested = list(dict.fromkeys(job.columns))
+        available = [c for c in requested if c in frame.columns]
+        missing = [c for c in requested if c not in frame.columns]
+        use_columns = available
+        log_fn = logger.warning if missing else logger.info
+        log_fn(
+            "corr factors resolved: requested=%s available_in_frame=%s missing=%s use=%s",
+            requested,
+            available,
+            missing,
+            use_columns,
+        )
+        if len(use_columns) < 2:
+            raise InsufficientFactorsError(
+                "corr needs at least 2 factors after filtering; "
+                f"requested={requested!r} available_in_frame={available!r} "
+                f"missing={missing!r} use={use_columns!r}"
+            )
+        selected_columns = use_columns
+
     # 2) 計算相關矩陣
     corr_matrix = compute_corr_matrix(
         frame,
-        columns=job.columns,
+        columns=selected_columns,
         method=job.method,
         min_periods=job.min_periods,
     )
@@ -419,6 +460,15 @@ def run_corr_job(job: FactorCorrJob) -> None:
     logger.info("written corr pairs to %s", job.pairs_path)
 
     # 5.3 摘要 JSON
+    pairs_payload = [
+        {
+            "a": str(row["factor_1"]),
+            "b": str(row["factor_2"]),
+            "corr": float(row["corr"]),
+        }
+        for _, row in pairs_df.iterrows()
+    ]
+
     summary_obj = {
         "as_of": job.as_of,
         "window_label": job.window_label,
@@ -426,6 +476,7 @@ def run_corr_job(job: FactorCorrJob) -> None:
         "min_periods": job.min_periods,
         "n_factors": int(summary.matrix.shape[1]),
         "max_abs_corr_per_factor": summary.max_abs_per_factor,
+        "pairs": pairs_payload,
         "input_path": str(job.input_path),
         "matrix_path": str(job.matrix_path),
         "pairs_path": str(job.pairs_path),
@@ -473,6 +524,12 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         type=str,
         required=True,
         help="Comma-separated list of window months, e.g. '6,12,24'.",
+    )
+    parser.add_argument(
+        "--factors",
+        type=str,
+        default=None,
+        help="Comma-separated factor_ids to compute corr for (default: use active factors from plan).",
     )
     parser.add_argument(
         "--engine",
@@ -542,6 +599,13 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     output_format = args.output_format
     method = args.method
     min_periods = int(args.min_periods)
+    requested_factors: Optional[List[str]] = None
+    if args.factors:
+        try:
+            requested_factors = parse_factors_arg(args.factors)
+        except ValueError as exc:
+            logger.error("invalid --factors value: %s", exc)
+            return 2
 
     logger.info(
         "factor_corr main start: root=%s as_of=%s windows=%s engine=%s profile=%s panel_source=%s",
@@ -553,27 +617,35 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         panel_source,
     )
 
-    # 從 factor_plan 選出 active factors
-    try:
-        plan = load_factor_plan(root, as_of=as_of, engine=args.engine)
-    except FileNotFoundError as exc:
-        logger.error("failed to load factor_plan: %s", exc)
-        return 1
-
-    factor_ids = select_active_factors(plan)
-    if not factor_ids:
-        logger.warning(
-            "no active factors found in factor_plan for as_of=%s engine=%s; nothing to do",
-            as_of,
-            args.engine,
+    if requested_factors is not None:
+        factor_ids = requested_factors
+        logger.info(
+            "requested factors from --factors (n=%d): %s",
+            len(factor_ids),
+            ", ".join(factor_ids),
         )
-        return 0
+    else:
+        # 從 factor_plan 選出 active factors
+        try:
+            plan = load_factor_plan(root, as_of=as_of, engine=args.engine)
+        except FileNotFoundError as exc:
+            logger.error("failed to load factor_plan: %s", exc)
+            return 1
 
-    logger.info("active factors from plan: %s", ", ".join(factor_ids))
+        factor_ids = select_active_factors(plan)
+        if not factor_ids:
+            logger.warning(
+                "no active factors found in factor_plan for as_of=%s engine=%s; nothing to do",
+                as_of,
+                args.engine,
+            )
+            return 0
+        logger.info("active factors from plan: %s", ", ".join(factor_ids))
 
     as_of_dt = pd.to_datetime(as_of).date()  # 目前僅用於 log
 
     any_success = False
+    any_insufficient = False
 
     for w in windows:
         window_label = window_label_for_months(w)
@@ -589,6 +661,17 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                     window_months=w,
                 )
             except Exception as exc:  # noqa: BLE001
+                if requested_factors is not None and _is_insufficient_panel_error(exc):
+                    logger.warning(
+                        "corr factors resolved (panel build failed): "
+                        "requested=%s available_in_frame=%s missing=%s use=%s",
+                        requested_factors,
+                        [],
+                        requested_factors,
+                        [],
+                    )
+                    any_insufficient = True
+                    continue
                 logger.error(
                     "failed to build panel from factor parquet for window=%dm: %s",
                     w,
@@ -615,7 +698,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         job = FactorCorrJob(
             root=root,
             input_path=panel_path,
-            columns=None,  # 預設：讓 corr_lib 自己決定 numeric columns
+            columns=factor_ids if requested_factors is not None else None,
             method=method,
             min_periods=min_periods,
             as_of=as_of,
@@ -626,6 +709,15 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         try:
             run_corr_job(job)
             any_success = True
+        except InsufficientFactorsError as exc:
+            logger.error(
+                "corr job aborted for window=%dm (label=%s): %s",
+                w,
+                window_label,
+                exc,
+            )
+            any_insufficient = True
+            continue
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "corr job failed for window=%dm (label=%s): %s",
@@ -635,6 +727,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             )
 
     if not any_success:
+        if requested_factors is not None and any_insufficient:
+            logger.error(
+                "no corr job succeeded; insufficient factors for requested set."
+            )
+            return 2
         logger.error("no corr job succeeded for any window; exiting with failure.")
         return 1
 

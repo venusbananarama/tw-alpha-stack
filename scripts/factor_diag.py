@@ -17,6 +17,10 @@ Phase-2 因子診斷工具箱（read-only）：
      - 根據 reports/factor_eval/*_summary.json（以及可選 rules_factors.yaml），
        列出每顆因子在各個 WF 視窗下的 rank_ic / ic / coverage / sample_days 等摘要。
 
+  4) dig 子指令：DIG 全面檢測（診斷對照）
+     - 根據 rules_factors.yaml + wf_summary/gate_summary/factor_eval/corr_summary，
+       產出 CSV/JSON/MD 報告，供稽核與追蹤。
+
 使用方式（在 repo root）：
 
   # 1) 因子依賴檢查
@@ -41,7 +45,7 @@ import json
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 import pandas as pd
 import yaml
@@ -854,13 +858,654 @@ def _format_eval_table(rows: List[FactorEvalRow]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# dig mode: DIG overall check
+# ---------------------------------------------------------------------------
+
+
+def _parse_windows_arg(value: str) -> List[int]:
+    parts = [p.strip() for p in str(value).split(",") if p.strip()]
+    if not parts:
+        raise SystemExit("windows is empty")
+    windows: List[int] = []
+    for p in parts:
+        try:
+            v = int(p)
+        except Exception as exc:
+            raise SystemExit(f"invalid window value: {p!r}") from exc
+        if v <= 0:
+            raise SystemExit(f"window value must be positive, got {v}")
+        windows.append(v)
+    return windows
+
+
+def _resolve_path(root: Path, path: Path) -> Path:
+    return path if path.is_absolute() else (root / path)
+
+
+def _safe_float(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        try:
+            return float(str(value))
+        except Exception:
+            return None
+
+
+def _load_json_mapping(path: Path) -> Tuple[Optional[Mapping[str, Any]], Optional[str]]:
+    if not path.exists():
+        return None, "missing"
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None, "invalid_json"
+    from collections.abc import Mapping as _Mapping
+
+    if not isinstance(data, _Mapping):
+        return None, "not_mapping"
+    return data, None
+
+
+def _build_dig_factor_config(rules: Mapping[str, object]) -> Dict[str, Dict[str, object]]:
+    factors = rules.get("factors") or []
+    if not isinstance(factors, list):
+        return {}
+    from collections.abc import Mapping as _Mapping
+
+    cfg: Dict[str, Dict[str, object]] = {}
+    for item in factors:
+        if not isinstance(item, _Mapping):
+            continue
+        fid = str(item.get("factor_id", "")).strip()
+        if not fid:
+            continue
+        wf_windows_raw = item.get("wf_windows") or []
+        wf_windows: List[int] = []
+        if isinstance(wf_windows_raw, list):
+            for w in wf_windows_raw:
+                try:
+                    val = int(w)
+                except Exception:
+                    continue
+                if val > 0:
+                    wf_windows.append(val)
+        gate_rules = item.get("gate_rules") or {}
+        if not isinstance(gate_rules, _Mapping):
+            gate_rules = {}
+        cfg[fid] = {
+            "enabled": bool(item.get("enabled", False)),
+            "wf_windows": wf_windows,
+            "min_rank_ic": _safe_float(gate_rules.get("min_rank_ic")),
+            "min_coverage": _safe_float(gate_rules.get("min_coverage")),
+            "engine": str(item.get("engine") or "").strip(),
+            "category": str(item.get("category") or "").strip(),
+        }
+    return cfg
+
+
+def _scan_factor_eval(factor_eval_dir: Path) -> Dict[str, Mapping[str, object]]:
+    evals: Dict[str, Mapping[str, object]] = {}
+    for path in _iter_factor_eval_files(factor_eval_dir):
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        from collections.abc import Mapping as _Mapping
+
+        if not isinstance(data, _Mapping):
+            continue
+        fid = str(data.get("factor_id") or path.stem.replace("_summary", "")).strip()
+        if not fid:
+            continue
+        evals[fid] = data
+    return evals
+
+
+def _extract_roster(wf_summary: Optional[Mapping[str, Any]]) -> Tuple[List[str], List[str]]:
+    if not wf_summary:
+        return [], []
+    passed: Set[str] = set()
+    candidates: Set[str] = set()
+    factors_block = wf_summary.get("factors") or {}
+    from collections.abc import Mapping as _Mapping
+
+    if isinstance(factors_block, _Mapping):
+        passed_block = factors_block.get("passed") or {}
+        if isinstance(passed_block, _Mapping):
+            passed.update(str(k) for k in passed_block.keys())
+        candidates_block = factors_block.get("candidates") or {}
+        if isinstance(candidates_block, _Mapping):
+            candidates.update(str(k) for k in candidates_block.keys())
+
+    if not passed and not candidates:
+        by_status = wf_summary.get("factors_by_status") or {}
+        if isinstance(by_status, _Mapping):
+            passed_block = by_status.get("passed") or {}
+            if isinstance(passed_block, _Mapping):
+                passed.update(str(k) for k in passed_block.keys())
+            candidates_block = by_status.get("candidates") or {}
+            if isinstance(candidates_block, _Mapping):
+                candidates.update(str(k) for k in candidates_block.keys())
+
+    return sorted(passed), sorted(candidates)
+
+
+def _check_metric(
+    name: str,
+    value: Optional[float],
+    threshold: Optional[float],
+) -> Tuple[Optional[bool], Optional[float], Optional[str]]:
+    if threshold is None:
+        return None, None, None
+    if value is None:
+        return False, None, f"{name}_missing"
+    delta = value - threshold
+    if value < threshold:
+        return False, delta, f"{name}_below_min"
+    return True, delta, None
+
+
+def build_dig_table(
+    cfg: Dict[str, Dict[str, object]],
+    evals: Dict[str, Mapping[str, object]],
+    windows: Sequence[int],
+    scope: str,
+    passed_set: Optional[Set[str]] = None,
+) -> Tuple[pd.DataFrame, int, Dict[str, Dict[str, object]]]:
+    rows: List[Dict[str, object]] = []
+    failed_rows = 0
+    failed_factors: Dict[str, Dict[str, object]] = {}
+
+    factor_ids = sorted(cfg.keys())
+    if scope == "enabled":
+        factor_ids = [fid for fid in factor_ids if cfg[fid].get("enabled") is True]
+    elif scope == "passed":
+        if passed_set:
+            factor_ids = [fid for fid in factor_ids if fid in passed_set]
+        else:
+            factor_ids = []
+
+    for fid in factor_ids:
+        meta = cfg[fid]
+        wf_windows = meta.get("wf_windows") or []
+        wf_windows_set = set(wf_windows)
+        wf_windows_label = ",".join(str(w) for w in wf_windows) if wf_windows else ""
+        eval_data = evals.get(fid, {})
+        windows_block = eval_data.get("windows") if isinstance(eval_data, Mapping) else {}
+        if not isinstance(windows_block, Mapping):
+            windows_block = {}
+
+        for w in windows:
+            if wf_windows_set and w not in wf_windows_set:
+                continue
+            metrics = windows_block.get(str(w)) or {}
+            if not isinstance(metrics, Mapping):
+                metrics = {}
+
+            rank_ic_mean = _safe_get(metrics, "rank_ic_mean")
+            if rank_ic_mean is None:
+                rank_ic_mean = _safe_get(metrics, "rank_ic")
+
+            coverage = _safe_get(metrics, "coverage")
+            if coverage is None:
+                coverage = _safe_get(metrics, "coverage_ratio")
+            if coverage is None:
+                coverage = _safe_get(metrics, "coverage_mean")
+
+            min_rank_ic = _safe_float(meta.get("min_rank_ic"))
+            min_coverage = _safe_float(meta.get("min_coverage"))
+
+            ok_rank_ic, delta_rank_ic, reason_rank = _check_metric(
+                "rank_ic",
+                rank_ic_mean,
+                min_rank_ic,
+            )
+            ok_coverage, delta_coverage, reason_cov = _check_metric(
+                "coverage",
+                coverage,
+                min_coverage,
+            )
+
+            reasons: List[str] = []
+            if reason_rank:
+                reasons.append(reason_rank)
+            if reason_cov:
+                reasons.append(reason_cov)
+            if reasons:
+                failed_rows += 1
+                entry = failed_factors.setdefault(
+                    fid,
+                    {"failed_windows": [], "reasons": []},
+                )
+                entry["failed_windows"].append(int(w))
+                for reason in reasons:
+                    if reason not in entry["reasons"]:
+                        entry["reasons"].append(reason)
+
+            rows.append(
+                {
+                    "factor_id": fid,
+                    "window_m": int(w),
+                    "enabled": bool(meta.get("enabled", False)),
+                    "wf_windows": wf_windows_label,
+                    "rank_ic_mean": rank_ic_mean,
+                    "min_rank_ic": min_rank_ic,
+                    "ok_rank_ic": ok_rank_ic,
+                    "delta_rank_ic": delta_rank_ic,
+                    "coverage": coverage,
+                    "min_coverage": min_coverage,
+                    "ok_coverage": ok_coverage,
+                    "delta_coverage": delta_coverage,
+                }
+            )
+
+    columns = [
+        "factor_id",
+        "window_m",
+        "enabled",
+        "wf_windows",
+        "rank_ic_mean",
+        "min_rank_ic",
+        "ok_rank_ic",
+        "delta_rank_ic",
+        "coverage",
+        "min_coverage",
+        "ok_coverage",
+        "delta_coverage",
+    ]
+    df = pd.DataFrame(rows, columns=columns)
+    return df, failed_rows, failed_factors
+
+
+def _load_corr_pairs(path: Path) -> Tuple[Optional[List[Tuple[str, str, float]]], Optional[str]]:
+    data, err = _load_json_mapping(path)
+    if data is None:
+        return None, err
+
+    if "pairs" in data:
+        pairs_raw = data.get("pairs") or []
+        if not isinstance(pairs_raw, list):
+            return None, "schema_invalid"
+        out: List[Tuple[str, str, float]] = []
+        for item in pairs_raw:
+            if not isinstance(item, Mapping):
+                continue
+            a = str(item.get("a") or "").strip()
+            b = str(item.get("b") or "").strip()
+            if not a or not b:
+                continue
+            corr = _safe_float(item.get("corr"))
+            if corr is None:
+                continue
+            out.append((a, b, corr))
+        return out, None
+
+    if "factors" in data and "matrix" in data:
+        factors = data.get("factors")
+        matrix = data.get("matrix")
+        if not isinstance(factors, list) or not isinstance(matrix, list):
+            return None, "schema_invalid"
+        if len(matrix) != len(factors):
+            return None, "schema_invalid"
+        out: List[Tuple[str, str, float]] = []
+        for i, row in enumerate(matrix):
+            if not isinstance(row, list) or len(row) != len(factors):
+                return None, "schema_invalid"
+            for j in range(i + 1, len(factors)):
+                a = str(factors[i]).strip()
+                b = str(factors[j]).strip()
+                if not a or not b:
+                    continue
+                corr = _safe_float(row[j])
+                if corr is None:
+                    continue
+                out.append((a, b, corr))
+        return out, None
+
+    return None, "schema_unsupported"
+
+
+def _summarize_corr_pairs(
+    pairs: List[Tuple[str, str, float]],
+    passed_set: Set[str],
+    top_n: int,
+) -> Dict[str, object]:
+    filtered: List[Tuple[str, str, float]] = [
+        (a, b, corr)
+        for a, b, corr in pairs
+        if a in passed_set and b in passed_set
+    ]
+    scored = sorted(filtered, key=lambda x: abs(x[2]), reverse=True)
+    top = scored[: max(top_n, 0)]
+    top_pairs = [
+        {
+            "a": a,
+            "b": b,
+            "corr": float(corr),
+            "abs_corr": float(abs(corr)),
+        }
+        for a, b, corr in top
+    ]
+
+    per_factor: Dict[str, float] = {}
+    for a, b, corr in filtered:
+        value = abs(corr)
+        prev_a = per_factor.get(a)
+        prev_b = per_factor.get(b)
+        if prev_a is None or value > prev_a:
+            per_factor[a] = float(value)
+        if prev_b is None or value > prev_b:
+            per_factor[b] = float(value)
+    return {
+        "top_pairs": top_pairs,
+        "per_factor_max_abs_corr": per_factor,
+    }
+
+
+def _format_dig_table(rows: List[Mapping[str, object]]) -> str:
+    headers = [
+        "factor_id",
+        "window_m",
+        "enabled",
+        "wf_windows",
+        "rank_ic_mean",
+        "min_rank_ic",
+        "ok_rank_ic",
+        "delta_rank_ic",
+        "coverage",
+        "min_coverage",
+        "ok_coverage",
+        "delta_coverage",
+    ]
+
+    def _enabled_str(x: Optional[bool]) -> str:
+        if x is True:
+            return "Y"
+        if x is False:
+            return "N"
+        return "?"
+
+    def _ok_str(x: Optional[bool]) -> str:
+        if x is True:
+            return "Y"
+        if x is False:
+            return "N"
+        return "-"
+
+    def _fmt_f(v: Optional[float], ndigits: int = 4) -> str:
+        if v is None:
+            return "-"
+        try:
+            return f"{v:.{ndigits}f}"
+        except Exception:
+            return str(v)
+
+    def _row_to_cells(r: Mapping[str, object]) -> List[str]:
+        return [
+            str(r.get("factor_id") or ""),
+            str(r.get("window_m") or ""),
+            _enabled_str(r.get("enabled") if isinstance(r.get("enabled"), bool) else None),
+            str(r.get("wf_windows") or ""),
+            _fmt_f(_safe_float(r.get("rank_ic_mean"))),
+            _fmt_f(_safe_float(r.get("min_rank_ic"))),
+            _ok_str(r.get("ok_rank_ic") if isinstance(r.get("ok_rank_ic"), bool) else None),
+            _fmt_f(_safe_float(r.get("delta_rank_ic"))),
+            _fmt_f(_safe_float(r.get("coverage")), ndigits=3),
+            _fmt_f(_safe_float(r.get("min_coverage")), ndigits=3),
+            _ok_str(r.get("ok_coverage") if isinstance(r.get("ok_coverage"), bool) else None),
+            _fmt_f(_safe_float(r.get("delta_coverage")), ndigits=3),
+        ]
+
+    data_rows = [_row_to_cells(r) for r in rows]
+    if not data_rows:
+        return "(no rows)"
+
+    cols = list(zip(*([headers] + data_rows)))
+    widths = [max(len(str(c)) for c in col) for col in cols]
+
+    def _fmt_line(cells: List[str]) -> str:
+        return " | ".join(str(c).ljust(w) for c, w in zip(cells, widths))
+
+    lines = [_fmt_line(headers), "-+-".join("-" * w for w in widths)]
+    for cells in data_rows:
+        lines.append(_fmt_line(cells))
+    return "\n".join(lines)
+
+
+def _render_dig_markdown(
+    as_of: str,
+    gate: Dict[str, object],
+    factor_slo: Dict[str, object],
+    roster: Dict[str, List[str]],
+    failed_rows: List[Mapping[str, object]],
+    corr_summary: Dict[str, object],
+) -> str:
+    lines: List[str] = []
+    lines.append(f"# DIG Report ({as_of})")
+    lines.append("")
+    gate_status = gate.get("status")
+    gate_rate = gate.get("pass_rate")
+    gate_slo = gate.get("factor_slo_satisfied")
+    lines.append(f"- gate: {gate_status} (pass_rate={gate_rate}, factor_slo_satisfied={gate_slo})")
+    lines.append(
+        f"- factor_slo: satisfied={factor_slo.get('satisfied')}, total_factors={factor_slo.get('total_factors')}, "
+        f"per_window_counts={factor_slo.get('per_window_counts')}"
+    )
+    lines.append(f"- roster passed ({len(roster.get('passed', []))}): {', '.join(roster.get('passed', []))}")
+    lines.append(
+        f"- roster candidates ({len(roster.get('candidates', []))}): {', '.join(roster.get('candidates', []))}"
+    )
+    lines.append("")
+    lines.append("## DIG Checks (failed rows, top 50)")
+    if not failed_rows:
+        lines.append("")
+        lines.append("no failed rows")
+    else:
+        lines.append("")
+        lines.append("```")
+        lines.append(_format_dig_table(failed_rows[:50]))
+        lines.append("```")
+
+    lines.append("")
+    lines.append("## Corr Risk")
+    corr_available = corr_summary.get("available")
+    if not corr_available:
+        lines.append("")
+        lines.append(f"corr unavailable: {corr_summary.get('reason_if_unavailable')}")
+    else:
+        per_window = corr_summary.get("per_window") or {}
+        for w_key in sorted(per_window.keys(), key=lambda x: int(x)):
+            block = per_window.get(w_key) or {}
+            lines.append("")
+            lines.append(f"### {w_key}m")
+            if not block.get("available"):
+                lines.append(f"- unavailable: {block.get('reason')}")
+                continue
+            pairs = block.get("top_pairs") or []
+            if not pairs:
+                lines.append("- no pairs within passed roster")
+                continue
+            for item in pairs:
+                a = item.get("a")
+                b = item.get("b")
+                corr = item.get("corr")
+                tag = ""
+                if isinstance(a, str) and isinstance(b, str):
+                    if a.startswith("vol_") and b.startswith("vol_"):
+                        tag = " [VOL]"
+                lines.append(f"- {a} vs {b}: corr={corr}{tag}")
+
+    lines.append("")
+    lines.append("## Next Steps")
+    if failed_rows:
+        lines.append("- review factors/windows failing min_rank_ic or min_coverage; re-run factor_eval after data fixes")
+    if corr_available:
+        lines.append("- review high-corr pairs in passed roster (especially VOL family) for diversification risk")
+    if not failed_rows and not corr_available:
+        lines.append("- dig checks clean; no immediate action")
+    return "\n".join(lines)
+
+
+def run_dig(
+    root: Path,
+    as_of: str,
+    rules_path: Path,
+    wf_summary_path: Path,
+    gate_summary_path: Path,
+    factor_eval_dir: Path,
+    corr_dir: Path,
+    windows: Sequence[int],
+    scope: str,
+    out_dir: Path,
+    top_corr_pairs: int,
+) -> Dict[str, Path]:
+    rules = _load_rules_factors(rules_path)
+    cfg = _build_dig_factor_config(rules)
+
+    wf_summary, _ = _load_json_mapping(wf_summary_path)
+    gate_summary, _ = _load_json_mapping(gate_summary_path)
+    evals = _scan_factor_eval(factor_eval_dir)
+
+    passed_list, candidates_list = _extract_roster(wf_summary)
+    passed_set = set(passed_list)
+
+    df, failed_rows, failed_factors = build_dig_table(
+        cfg=cfg,
+        evals=evals,
+        windows=windows,
+        scope=scope,
+        passed_set=passed_set,
+    )
+
+    gate_overall = gate_summary.get("overall") if gate_summary else {}
+    gate_status = gate_overall.get("gate") if isinstance(gate_overall, Mapping) else None
+    gate_pass_rate = gate_overall.get("pass_rate") if isinstance(gate_overall, Mapping) else None
+    gate_slo = (
+        gate_overall.get("factor_slo_satisfied")
+        if isinstance(gate_overall, Mapping)
+        else None
+    )
+
+    wf_factor_slo = wf_summary.get("factor_slo") if wf_summary else {}
+    if not isinstance(wf_factor_slo, Mapping):
+        wf_factor_slo = {}
+
+    missing_required = wf_factor_slo.get("missing_required_factors")
+    if missing_required is None:
+        missing_required = wf_factor_slo.get("missing_required")
+    if missing_required is None:
+        missing_required = []
+
+    summary: Dict[str, object] = {
+        "as_of": as_of,
+        "gate": {
+            "status": gate_status,
+            "pass_rate": gate_pass_rate,
+            "factor_slo_satisfied": gate_slo,
+        },
+        "factor_slo": {
+            "satisfied": wf_factor_slo.get("satisfied"),
+            "total_factors": wf_factor_slo.get("total_factors"),
+            "per_window_counts": wf_factor_slo.get("per_window_counts") or {},
+            "missing_required": missing_required,
+        },
+        "roster": {
+            "passed": passed_list,
+            "candidates": candidates_list,
+        },
+        "dig": {
+            "total_rows": int(len(df)),
+            "failed_rows": int(failed_rows),
+            "failed_factors": failed_factors,
+        },
+    }
+
+    corr_per_window: Dict[str, Dict[str, object]] = {}
+    corr_any_available = False
+    corr_reason = None
+    for w in windows:
+        window_label = f"{int(w)}m"
+        corr_path = corr_dir / f"corr_summary_{as_of}_{window_label}.json"
+        pairs, reason = _load_corr_pairs(corr_path)
+        if pairs is None:
+            corr_per_window[str(w)] = {
+                "available": False,
+                "reason": reason,
+                "top_pairs": [],
+                "per_factor_max_abs_corr": {},
+            }
+            if corr_reason is None:
+                corr_reason = reason
+            continue
+        corr_any_available = True
+        corr_data = _summarize_corr_pairs(pairs, passed_set, top_corr_pairs)
+        corr_per_window[str(w)] = {
+            "available": True,
+            "reason": None,
+            "top_pairs": corr_data.get("top_pairs") or [],
+            "per_factor_max_abs_corr": corr_data.get("per_factor_max_abs_corr") or {},
+        }
+
+    summary["corr"] = {
+        "available": corr_any_available,
+        "reason_if_unavailable": None if corr_any_available else corr_reason or "unavailable",
+        "per_window": corr_per_window,
+    }
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = out_dir / f"factor_dig_table.{as_of}.csv"
+    json_path = out_dir / f"factor_dig_summary.{as_of}.json"
+    md_path = out_dir / f"DIG_{as_of}.md"
+
+    df.to_csv(csv_path, index=False)
+    with json_path.open("w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+
+    failed_rows_list = []
+    if not df.empty:
+        for _, row in df.iterrows():
+            ok_rank = row.get("ok_rank_ic")
+            ok_cov = row.get("ok_coverage")
+            if ok_rank is False or ok_cov is False:
+                failed_rows_list.append(row.to_dict())
+
+    gate_section = summary.get("gate") if isinstance(summary.get("gate"), dict) else {}
+    factor_slo_section = (
+        summary.get("factor_slo") if isinstance(summary.get("factor_slo"), dict) else {}
+    )
+    roster_section = summary.get("roster") if isinstance(summary.get("roster"), dict) else {}
+    corr_section = summary.get("corr") if isinstance(summary.get("corr"), dict) else {}
+
+    md_text = _render_dig_markdown(
+        as_of=as_of,
+        gate=gate_section,
+        factor_slo=factor_slo_section,
+        roster=roster_section,
+        failed_rows=failed_rows_list,
+        corr_summary=corr_section,
+    )
+    with md_path.open("w", encoding="utf-8") as f:
+        f.write(md_text)
+
+    return {
+        "csv": csv_path,
+        "json": json_path,
+        "md": md_path,
+    }
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Phase-2 factor diagnostics (deps / gate / eval).",
+        description="Phase-2 factor diagnostics (deps / gate / eval / dig).",
         formatter_class=argparse.RawTextHelpFormatter,
     )
 
@@ -959,6 +1604,79 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         type=int,
         default=0,
         help="最少 sample_days，低於此值的視窗不顯示（預設 0 = 不過濾）。",
+    )
+
+    # dig 子指令
+    p_dig = subparsers.add_parser(
+        "dig",
+        help="DIG 全面檢測：輸出 CSV/JSON/MD 報告供稽核。",
+    )
+    p_dig.add_argument(
+        "--root",
+        type=Path,
+        default=Path("."),
+        help="Repo root（預設為 .）",
+    )
+    p_dig.add_argument(
+        "--as-of",
+        type=str,
+        required=True,
+        help="As-of date label (YYYY-MM-DD).",
+    )
+    p_dig.add_argument(
+        "--rules",
+        type=Path,
+        default=Path("rules_factors.yaml"),
+        help="rules_factors.yaml 路徑（預設為 ./rules_factors.yaml）",
+    )
+    p_dig.add_argument(
+        "--wf-summary",
+        type=Path,
+        default=Path("reports") / "wf_summary.json",
+        help="wf_summary.json 路徑（預設為 ./reports/wf_summary.json）",
+    )
+    p_dig.add_argument(
+        "--gate-summary",
+        type=Path,
+        default=Path("reports") / "gate_summary.json",
+        help="gate_summary.json 路徑（預設為 ./reports/gate_summary.json）",
+    )
+    p_dig.add_argument(
+        "--factor-eval-dir",
+        type=Path,
+        default=Path("reports") / "factor_eval",
+        help="factor_eval 摘要所在資料夾（預設為 ./reports/factor_eval）",
+    )
+    p_dig.add_argument(
+        "--corr-dir",
+        type=Path,
+        default=Path("reports") / "factor_corr",
+        help="corr_summary 所在資料夾（預設為 ./reports/factor_corr）",
+    )
+    p_dig.add_argument(
+        "--windows",
+        type=str,
+        default="6,12,24",
+        help="視窗清單（逗號分隔，例如 '6,12,24'）。",
+    )
+    p_dig.add_argument(
+        "--scope",
+        type=str,
+        choices=["all", "enabled", "passed"],
+        default="all",
+        help="Factor 範圍：all/enabled/passed（預設 all）。",
+    )
+    p_dig.add_argument(
+        "--out-dir",
+        type=Path,
+        default=Path("reports") / "dig",
+        help="輸出資料夾（預設為 ./reports/dig）",
+    )
+    p_dig.add_argument(
+        "--top-corr-pairs",
+        type=int,
+        default=20,
+        help="corr top pairs 數量（預設 20）。",
     )
 
     args = parser.parse_args(argv)
@@ -1069,6 +1787,34 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 """.rstrip()
             )
         )
+    elif cmd == "dig":
+        root: Path = args.root.resolve()
+        rules_path = _resolve_path(root, args.rules)
+        wf_summary_path = _resolve_path(root, args.wf_summary)
+        gate_summary_path = _resolve_path(root, args.gate_summary)
+        factor_eval_dir = _resolve_path(root, args.factor_eval_dir)
+        corr_dir = _resolve_path(root, args.corr_dir)
+        out_dir = _resolve_path(root, args.out_dir)
+        windows = _parse_windows_arg(args.windows)
+
+        outputs = run_dig(
+            root=root,
+            as_of=args.as_of,
+            rules_path=rules_path,
+            wf_summary_path=wf_summary_path,
+            gate_summary_path=gate_summary_path,
+            factor_eval_dir=factor_eval_dir,
+            corr_dir=corr_dir,
+            windows=windows,
+            scope=args.scope,
+            out_dir=out_dir,
+            top_corr_pairs=int(args.top_corr_pairs),
+        )
+
+        print("DIG outputs written:")
+        print(f"- {outputs['csv']}")
+        print(f"- {outputs['json']}")
+        print(f"- {outputs['md']}")
     else:
         parser.error(f"未知子指令：{cmd!r}")
 
