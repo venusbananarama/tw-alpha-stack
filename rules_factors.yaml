@@ -484,6 +484,27 @@ factors:
       # max_corr: 0.80       # TODO: enable when corr_summary is wired into gating
     enabled: true
 
+  - factor_id: liq_amihud_120d
+    category: classic
+    description: "120-day Amihud illiquidity (|ret|/turnover) with liquidity sign flip."
+    universe: tw_eq_investable
+    data_freq: daily
+    engine: microstructure_v1
+    impl_notes: >
+      Uses close and Trading_turnover from silver prices to compute |ret|/turnover,
+      then 120D rolling mean with log1p and sign flip (liquidity score).
+    inputs: ["prices"]
+    params:
+      window_days: 120
+      min_periods: 120
+    wf_windows: [12, 24]
+    gate_rules:
+      min_rank_ic: 0.010
+      min_coverage: 0.95
+      # max_turnover: 0.15   # TODO: enable when turnover is available in factor_eval
+      # max_corr: 0.80       # TODO: enable when corr_summary is wired into gating
+    enabled: true
+
   - factor_id: adv_20d
     category: classic
     description: "20-day average daily value traded (ADV); transformed to illiquid proxy."

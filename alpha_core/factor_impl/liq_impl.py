@@ -487,6 +487,74 @@ def compute_liq_amihud_20d(
     return out.sort_values(["date", "stock_id"]).reset_index(drop=True)
 
 
+def compute_liq_amihud_120d(
+    prices: pd.DataFrame,
+    *,
+    window_days: int = 120,
+    min_periods: int = 120,
+    use_log_turnover: bool = True,
+    rolling_method: str = "median",
+) -> pd.DataFrame:
+    if prices.empty:
+        return pd.DataFrame(columns=["date", "stock_id", "factor_value"])
+
+    df = prices.copy()
+    if not pd.api.types.is_datetime64_any_dtype(df["date"]):
+        df["date"] = pd.to_datetime(df["date"])
+
+    if "close" not in df.columns or "Trading_turnover" not in df.columns:
+        return pd.DataFrame(columns=["date", "stock_id", "factor_value"])
+
+    df = df[["date", "stock_id", "close", "Trading_turnover"]].copy()
+    df = df.dropna(subset=["date", "stock_id"])
+    df["stock_id"] = df["stock_id"].astype(str)
+    df = df.sort_values(["stock_id", "date"], kind="mergesort")
+    df = df.drop_duplicates(subset=["date", "stock_id"], keep="last")
+
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
+    df["Trading_turnover"] = pd.to_numeric(df["Trading_turnover"], errors="coerce")
+    df.loc[df["close"] <= 0, "close"] = np.nan
+    df.loc[df["Trading_turnover"] <= 0, "Trading_turnover"] = np.nan
+
+    df["ret"] = df.groupby("stock_id")["close"].transform(
+        lambda s: s.pct_change(fill_method=None)
+    )
+    turnover = df["Trading_turnover"].where(df["Trading_turnover"] > 0)
+    if use_log_turnover:
+        turnover = np.log1p(turnover)
+    turnover = turnover.where(turnover > 0)
+    df["illiq"] = df["ret"].abs() / turnover
+    df["illiq"] = df["illiq"].replace([np.inf, -np.inf], np.nan)
+
+    min_periods = max(1, min(int(min_periods), int(window_days)))
+    method = str(rolling_method or "median").lower()
+    if method == "mean":
+        df["illiq_120d"] = df.groupby("stock_id")["illiq"].transform(
+            lambda s: s.rolling(window=window_days, min_periods=min_periods).mean()
+        )
+    else:
+        df["illiq_120d"] = df.groupby("stock_id")["illiq"].transform(
+            lambda s: s.rolling(window=window_days, min_periods=min_periods).median()
+        )
+    raw = df["illiq_120d"].where(df["illiq_120d"] >= 0)
+    df["value_raw"] = -np.log1p(raw)
+
+    invalid = ~np.isfinite(df["value_raw"])
+    df["factor_value"] = (
+        df.groupby("date", group_keys=False)["value_raw"]
+        .transform(_cs_soft_winsorized_zscore)
+    )
+    df["factor_value"] = _apply_invalid_floor_after_xform(
+        df["factor_value"],
+        df["date"],
+        invalid,
+        stock_ids=df["stock_id"],
+    )
+
+    out = df[["date", "stock_id", "factor_value"]].copy()
+    return out.sort_values(["date", "stock_id"]).reset_index(drop=True)
+
+
 def run_liq_amihud_20d_factor(
     *,
     prices: pd.DataFrame,
@@ -501,6 +569,27 @@ def run_liq_amihud_20d_factor(
         prices,
         window_days=window_days,
         min_periods=min_periods,
+    )
+
+
+def run_liq_amihud_120d_factor(
+    *,
+    prices: pd.DataFrame,
+    window: int,
+    end_date: date,
+    factor_id: Optional[str] = None,  # noqa: ARG001
+    **kwargs: Any,
+) -> pd.DataFrame:
+    window_days = int(kwargs.get("window_days", 120))
+    min_periods = int(kwargs.get("min_periods", 120))
+    use_log_turnover = bool(kwargs.get("use_log_turnover", True))
+    rolling_method = str(kwargs.get("rolling_method", "median"))
+    return compute_liq_amihud_120d(
+        prices,
+        window_days=window_days,
+        min_periods=min_periods,
+        use_log_turnover=use_log_turnover,
+        rolling_method=rolling_method,
     )
 
 
