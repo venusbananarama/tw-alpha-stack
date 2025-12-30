@@ -15,6 +15,78 @@ import pandas as pd
 from alpha_core.factor_xform import apply_xsection_xform, winsorize_xsection
 
 
+_INVALID_VALUE_MARGIN = 1.0
+_INVALID_VALUE_FALLBACK = -10.0
+_INVALID_SPREAD_EPS = 1e-6
+
+
+def _cs_soft_winsorized_zscore(
+    x: pd.Series,
+    lower_quantile: float = 0.01,
+    upper_quantile: float = 0.99,
+) -> pd.Series:
+    arr = x.to_numpy(dtype="float64")
+    if arr.size == 0:
+        return pd.Series(np.nan, index=x.index)
+
+    lo = np.nanquantile(arr, lower_quantile)
+    hi = np.nanquantile(arr, upper_quantile)
+
+    arr = arr.copy()
+    if np.isfinite(lo):
+        low_mask = arr < lo
+        if np.any(low_mask):
+            arr[low_mask] = lo - np.log1p(lo - arr[low_mask])
+    if np.isfinite(hi):
+        high_mask = arr > hi
+        if np.any(high_mask):
+            arr[high_mask] = hi + np.log1p(arr[high_mask] - hi)
+
+    mu = np.nanmean(arr)
+    sigma = np.nanstd(arr)
+    if not np.isfinite(sigma) or sigma == 0.0:
+        z = np.zeros_like(arr)
+    else:
+        z = (arr - mu) / sigma
+
+    return pd.Series(z, index=x.index)
+
+
+def _apply_invalid_floor_after_xform(
+    values: pd.Series,
+    dates: pd.Series,
+    invalid_mask: pd.Series,
+    *,
+    stock_ids: Optional[pd.Series] = None,
+    spread_eps: float = _INVALID_SPREAD_EPS,
+    fallback: float = _INVALID_VALUE_FALLBACK,
+) -> pd.Series:
+    valid_values = values.where(~invalid_mask)
+    min_by_date = valid_values.groupby(dates).transform("min")
+    filled = values.copy()
+    filled.loc[invalid_mask] = (min_by_date - _INVALID_VALUE_MARGIN).loc[invalid_mask]
+    spread_max = spread_eps if np.isfinite(spread_eps) else 0.0
+    spread_max = max(spread_max, min(_INVALID_VALUE_MARGIN * 0.5, 5e-4))
+    spread_max = max(spread_max, 2e-4)
+    spread_max = min(spread_max, _INVALID_VALUE_MARGIN * 0.9)
+    if stock_ids is not None and spread_max > 0.0:
+        invalid_idx = invalid_mask[invalid_mask].index
+        if not invalid_idx.empty:
+            tmp = pd.DataFrame(
+                {
+                    "date": dates.loc[invalid_idx],
+                    "stock_id": stock_ids.loc[invalid_idx].astype(str),
+                }
+            )
+            tmp = tmp.sort_values(["date", "stock_id"], kind="mergesort")
+            tmp["rank"] = tmp.groupby("date").cumcount() + 1
+            tmp["count"] = tmp.groupby("date")["stock_id"].transform("count")
+            jitter = (tmp["rank"] / (tmp["count"] + 1.0)) * spread_max
+            filled.loc[tmp.index] = filled.loc[tmp.index] - jitter
+    filled = filled.replace([np.inf, -np.inf], np.nan)
+    return filled.fillna(fallback)
+
+
 def _normalize_factor_frame(df: pd.DataFrame) -> pd.DataFrame:
     """Ensure factor frames use (date, stock_id, factor_value) with clean types."""
     if df is None or df.empty:
@@ -357,6 +429,79 @@ def compute_amihud(
 
     df = df.dropna(subset=["factor_value"])
     return df[["date", "stock_id", "factor_value"]].reset_index(drop=True)
+
+
+def compute_liq_amihud_20d(
+    prices: pd.DataFrame,
+    *,
+    window_days: int = 20,
+    min_periods: int = 15,
+) -> pd.DataFrame:
+    if prices.empty:
+        return pd.DataFrame(columns=["date", "stock_id", "factor_value"])
+
+    df = prices.copy()
+    if not pd.api.types.is_datetime64_any_dtype(df["date"]):
+        df["date"] = pd.to_datetime(df["date"])
+
+    if "close" not in df.columns or "Trading_turnover" not in df.columns:
+        return pd.DataFrame(columns=["date", "stock_id", "factor_value"])
+
+    df = df[["date", "stock_id", "close", "Trading_turnover"]].copy()
+    df = df.dropna(subset=["date", "stock_id"])
+    df["stock_id"] = df["stock_id"].astype(str)
+    df = df.sort_values(["stock_id", "date"], kind="mergesort")
+    df = df.drop_duplicates(subset=["date", "stock_id"], keep="last")
+
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
+    df["Trading_turnover"] = pd.to_numeric(df["Trading_turnover"], errors="coerce")
+    df.loc[df["close"] <= 0, "close"] = np.nan
+    df.loc[df["Trading_turnover"] <= 0, "Trading_turnover"] = np.nan
+
+    df["ret"] = df.groupby("stock_id")["close"].transform(
+        lambda s: s / s.shift(1) - 1.0
+    )
+    df["illiq"] = df["ret"].abs() / (df["Trading_turnover"] + 1.0)
+    df["illiq"] = df["illiq"].replace([np.inf, -np.inf], np.nan)
+
+    min_periods = max(1, min(int(min_periods), int(window_days)))
+    df["illiq_20d"] = df.groupby("stock_id")["illiq"].transform(
+        lambda s: s.rolling(window=window_days, min_periods=min_periods).mean()
+    )
+    df["value_raw"] = np.log1p(df["illiq_20d"])
+    df.loc[df["illiq_20d"] < 0, "value_raw"] = np.nan
+
+    invalid = ~np.isfinite(df["value_raw"])
+    df["factor_value"] = (
+        df.groupby("date", group_keys=False)["value_raw"]
+        .transform(_cs_soft_winsorized_zscore)
+    )
+    df["factor_value"] = _apply_invalid_floor_after_xform(
+        df["factor_value"],
+        df["date"],
+        invalid,
+        stock_ids=df["stock_id"],
+    )
+
+    out = df[["date", "stock_id", "factor_value"]].copy()
+    return out.sort_values(["date", "stock_id"]).reset_index(drop=True)
+
+
+def run_liq_amihud_20d_factor(
+    *,
+    prices: pd.DataFrame,
+    window: int,
+    end_date: date,
+    factor_id: Optional[str] = None,  # noqa: ARG001
+    **kwargs: Any,
+) -> pd.DataFrame:
+    window_days = int(kwargs.get("window_days", 20))
+    min_periods = int(kwargs.get("min_periods", 15))
+    return compute_liq_amihud_20d(
+        prices,
+        window_days=window_days,
+        min_periods=min_periods,
+    )
 
 
 def run_liquidity_factor(

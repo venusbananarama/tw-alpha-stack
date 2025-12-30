@@ -65,6 +65,11 @@ except Exception:
     run_liquidity_factor = None
 
 try:
+    from .liq_impl import run_liq_amihud_20d_factor
+except Exception:
+    run_liq_amihud_20d_factor = None
+
+try:
     from .vol_impl import run_vol_factor
 except Exception:
     run_vol_factor = None
@@ -84,6 +89,7 @@ FACTOR_IMPL_REGISTRY: Dict[str, Optional[FactorImpl]] = {
     "size_log_mktcap": run_size_factor,
     "adv_20d": run_liquidity_factor,
     "amihud_20d": run_liquidity_factor,
+    "liq_amihud_20d": run_liq_amihud_20d_factor,
 }
 
 # ---------------------------
@@ -109,6 +115,7 @@ FACTOR_REQUIRED_INPUTS: Dict[str, List[str]] = {
     "vol_20d": ["prices"],
     # 流動性
     "liq_turnover_20d": ["prices", "shareholding"],  # 或 inst_total，看你之後怎麼接
+    "liq_amihud_20d": ["prices"],
     "micro_imbalance_20d": ["prices"],
 }
 

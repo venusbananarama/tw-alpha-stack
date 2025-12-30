@@ -456,6 +456,34 @@ factors:
       # max_corr: 0.80       # TODO: enable when corr_summary is wired into gating
     enabled: true
 
+  - factor_id: liq_amihud_20d
+    category: classic
+    description: "20-day Amihud illiquidity (|ret|/turnover) using close and Trading_turnover."
+    universe: tw_eq_investable
+    data_freq: daily
+    engine: microstructure_v1
+    impl_notes: >
+      Uses close and Trading_turnover from silver prices to compute |ret|/(turnover+1),
+      then 20D rolling mean with log1p transform and per-date soft winsor + zscore.
+    inputs: ["prices"]
+    params:
+      turnover_lookback_days: 20
+      transform: log1p
+      winsor_pctl: 0.01
+      zscore: true
+      neutralize_with: size_log_mktcap
+      neutralize_method: ols
+      neutralize_group: date
+      direction: illiquid
+      min_obs_per_day: 50
+    wf_windows: [6, 12, 24]
+    gate_rules:
+      min_rank_ic: 0.010
+      min_coverage: 0.95
+      # max_turnover: 0.15   # TODO: enable when turnover is available in factor_eval
+      # max_corr: 0.80       # TODO: enable when corr_summary is wired into gating
+    enabled: true
+
   - factor_id: adv_20d
     category: classic
     description: "20-day average daily value traded (ADV); transformed to illiquid proxy."
