@@ -563,7 +563,7 @@ def run_liq_amihud_20d_factor(
     factor_id: Optional[str] = None,  # noqa: ARG001
     **kwargs: Any,
 ) -> pd.DataFrame:
-    window_days = int(kwargs.get("window_days", 20))
+    window_days = int(kwargs.get("window_days", kwargs.get("turnover_lookback_days", 20)))
     min_periods = int(kwargs.get("min_periods", 15))
     return compute_liq_amihud_20d(
         prices,
