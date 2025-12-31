@@ -11,8 +11,9 @@ Value factor implementation (PE / CFY).
 設計：
 - value_pe：
     - 先從 per 裡找出「PE 類」欄位（自動偵測常見命名）。
-    - 把 PE 映射成 value_raw = 1 / PE。
-    - 依每個 date 做 winsorize（1% / 99%）+ 橫斷面 z-score，輸出 factor_value。
+    - 若 per 含 EPS_TTM 與價格欄位，優先用 price / EPS_TTM 重算 PE 以降低噪音。
+    - 把 PE 映射成 earnings yield，並做 signed log1p 穩定化（負 PE 落在低端）。
+    - 依每個 date 做 soft winsorize（1% / 99%）+ 橫斷面 z-score，輸出 factor_value。
 - value_cfy：
     - 優先路線：用 cfs 長表抽出 CFO，計算 CFO_TTM / 市值，做橫斷面 winsor + z-score。
     - 若缺 cfs 或 CFO，退而求其次用「每股現金流 / 價格」或「總額現金流 / shares / 價格」。
@@ -63,6 +64,9 @@ except Exception:  # noqa: BLE001
 
 _PE_TOKEN_RE = re.compile(r"(^|[^a-z0-9])pe([^a-z0-9]|$)")
 _PER_TOKEN_RE = re.compile(r"(^|[^a-z0-9])per([^a-z0-9]|$)")
+_INVALID_VALUE_MARGIN = 1.0
+_INVALID_VALUE_FALLBACK = -10.0
+_INVALID_SPREAD_EPS = 1e-6
 
 
 def _pick_pe_column(df: pd.DataFrame) -> str:
@@ -76,10 +80,10 @@ def _pick_pe_column(df: pd.DataFrame) -> str:
     lower_map = {c.lower(): c for c in df.columns}
 
     candidates: List[str] = [
-        "pe",
-        "per",
         "pe_ttm",
         "per_ttm",
+        "pe",
+        "per",
         "pe_ratio",
         "peratio",
         "pe1",
@@ -129,6 +133,169 @@ def _pick_pe_column(df: pd.DataFrame) -> str:
     )
 
 
+def _pick_eps_ttm_column(df: pd.DataFrame) -> Optional[str]:
+    """
+    Try to locate an EPS TTM-like column for recomputing PE.
+    """
+    lower_map = {c.lower(): c for c in df.columns}
+    candidates: List[str] = [
+        "eps_ttm",
+        "eps_ttm_basic",
+        "eps_ttm_diluted",
+        "eps_basic_ttm",
+        "eps_diluted_ttm",
+        "eps_ttm_q",
+        "eps_ttm_q4",
+    ]
+
+    for name in candidates:
+        key = name.lower()
+        if key in lower_map:
+            return lower_map[key]
+
+    for orig in df.columns:
+        lower = orig.lower()
+        if "eps" in lower and "ttm" in lower:
+            if "growth" in lower or "chg" in lower or "change" in lower:
+                continue
+            return orig
+
+    return None
+
+
+def _pick_eps_column(df: pd.DataFrame) -> Optional[str]:
+    """
+    Try to locate a generic EPS column (non-TTM).
+    """
+    lower_map = {c.lower(): c for c in df.columns}
+    candidates: List[str] = [
+        "eps",
+        "eps_basic",
+        "eps_diluted",
+        "eps_ex_items",
+        "eps_q",
+        "eps_quarter",
+        "eps_quarterly",
+        "eps_normalized",
+    ]
+
+    for name in candidates:
+        key = name.lower()
+        if key in lower_map:
+            return lower_map[key]
+
+    for orig in df.columns:
+        lower = orig.lower()
+        if "eps" in lower and "ttm" not in lower:
+            if any(token in lower for token in ["growth", "chg", "change", "yoy"]):
+                continue
+            return orig
+
+    return None
+
+
+def _pick_net_income_ttm_column(df: pd.DataFrame) -> Optional[str]:
+    """
+    Try to locate a net-income TTM-like column for PE proxy.
+    """
+    lower_map = {c.lower(): c for c in df.columns}
+    candidates: List[str] = [
+        "net_income_ttm",
+        "netincome_ttm",
+        "net_profit_ttm",
+        "netprofit_ttm",
+        "net_income_after_tax_ttm",
+        "net_profit_after_tax_ttm",
+        "profit_after_tax_ttm",
+        "net_income_attr_p_ttm",
+    ]
+
+    for name in candidates:
+        key = name.lower()
+        if key in lower_map:
+            return lower_map[key]
+
+    for orig in df.columns:
+        lower = orig.lower()
+        if "ttm" in lower and ("net_income" in lower or "netprofit" in lower or "net_profit" in lower):
+            if any(token in lower for token in ["growth", "chg", "change", "yoy"]):
+                continue
+            return orig
+
+    return None
+
+
+def _pick_net_income_column(df: pd.DataFrame) -> Optional[str]:
+    """
+    Try to locate a net-income column (non-TTM) for PE proxy.
+    """
+    lower_map = {c.lower(): c for c in df.columns}
+    candidates: List[str] = [
+        "net_income",
+        "netincome",
+        "net_profit",
+        "netprofit",
+        "net_profit_after_tax",
+        "profit_after_tax",
+        "net_income_attr_p",
+        "net_income_attr_parent",
+        "net_income_parent",
+    ]
+
+    for name in candidates:
+        key = name.lower()
+        if key in lower_map:
+            return lower_map[key]
+
+    for orig in df.columns:
+        lower = orig.lower()
+        if "ttm" in lower:
+            continue
+        if "net_income" in lower or "netprofit" in lower or "net_profit" in lower:
+            if any(token in lower for token in ["growth", "chg", "change", "yoy"]):
+                continue
+            return orig
+
+    return None
+
+
+def _pick_shares_outstanding_column(df: pd.DataFrame) -> Optional[str]:
+    """
+    Try to locate a shares-outstanding column for market-cap proxy.
+    """
+    lower_map = {c.lower(): c for c in df.columns}
+    candidates: List[str] = [
+        "shares_outstanding",
+        "share_outstanding",
+        "shares_out",
+        "shares",
+        "outstanding_shares",
+        "total_shares",
+        "totalshares",
+        "TotalShares",
+    ]
+
+    for name in candidates:
+        key = name.lower()
+        if key in lower_map:
+            return lower_map[key]
+
+    return None
+
+
+def _normalize_stock_id_series(series: pd.Series) -> pd.Series:
+    """
+    Normalize stock_id for stable joins across per/prices tables.
+    """
+    out = series.astype(str).str.strip().str.upper()
+    out = out.str.replace(r"^(TW|TWO|TWSE|TPEX|OTC|TSE)[:\-]", "", regex=True)
+    out = out.str.replace(r"[.\s\-](TW|TWO|TWSE|TPEX|OTC|TSE)$", "", regex=True)
+    numeric_mask = out.str.fullmatch(r"\d+")
+    if numeric_mask.any():
+        out.loc[numeric_mask] = out.loc[numeric_mask].str.zfill(4)
+    return out
+
+
 def _resolve_pe_column(df: pd.DataFrame) -> str:
     """Backward-compatible alias for PE column selection."""
     return _pick_pe_column(df)
@@ -164,6 +331,93 @@ def _cs_winsorized_zscore(
         z = (arr - mu) / sigma
 
     return pd.Series(z, index=x.index)
+
+
+def _cs_soft_winsorized_zscore(
+    x: pd.Series,
+    lower_quantile: float = 0.01,
+    upper_quantile: float = 0.99,
+) -> pd.Series:
+    """
+    單一橫斷面序列做 soft winsorize + z-score，避免尾端被壓成同分。
+    """
+    arr = x.to_numpy(dtype="float64")
+
+    if arr.size == 0:
+        return pd.Series(np.nan, index=x.index)
+
+    lo = np.nanquantile(arr, lower_quantile)
+    hi = np.nanquantile(arr, upper_quantile)
+
+    arr = arr.copy()
+    if np.isfinite(lo):
+        low_mask = arr < lo
+        if np.any(low_mask):
+            arr[low_mask] = lo - np.log1p(lo - arr[low_mask])
+    if np.isfinite(hi):
+        high_mask = arr > hi
+        if np.any(high_mask):
+            arr[high_mask] = hi + np.log1p(arr[high_mask] - hi)
+
+    mu = np.nanmean(arr)
+    sigma = np.nanstd(arr)
+
+    if not np.isfinite(sigma) or sigma == 0.0:
+        z = np.zeros_like(arr)
+    else:
+        z = (arr - mu) / sigma
+
+    return pd.Series(z, index=x.index)
+
+
+def _fill_invalid_with_floor(x: pd.Series, floor_q: float = 0.01) -> pd.Series:
+    """
+    Fill NaN values with a per-date floor (worst) value for stable ranking.
+    """
+    valid = x.dropna()
+    if valid.empty:
+        return pd.Series(np.nan, index=x.index)
+    floor = float(valid.quantile(floor_q))
+    return x.fillna(floor - _INVALID_VALUE_MARGIN)
+
+
+def _apply_invalid_floor_after_xform(
+    values: pd.Series,
+    dates: pd.Series,
+    invalid_mask: pd.Series,
+    *,
+    stock_ids: Optional[pd.Series] = None,
+    spread_eps: float = _INVALID_SPREAD_EPS,
+    fallback: float = _INVALID_VALUE_FALLBACK,
+) -> pd.Series:
+    """
+    Ensure invalid values are always below the valid cross-section after transforms,
+    with an optional tiny spread to reduce ties.
+    """
+    valid_values = values.where(~invalid_mask)
+    min_by_date = valid_values.groupby(dates).transform("min")
+    filled = values.copy()
+    filled.loc[invalid_mask] = (min_by_date - _INVALID_VALUE_MARGIN).loc[invalid_mask]
+    spread_max = spread_eps if np.isfinite(spread_eps) else 0.0
+    spread_max = max(spread_max, min(_INVALID_VALUE_MARGIN * 0.5, 5e-4))
+    spread_max = max(spread_max, 2e-4)
+    spread_max = min(spread_max, _INVALID_VALUE_MARGIN * 0.9)
+    if stock_ids is not None and spread_max > 0.0:
+        invalid_idx = invalid_mask[invalid_mask].index
+        if not invalid_idx.empty:
+            tmp = pd.DataFrame(
+                {
+                    "date": dates.loc[invalid_idx],
+                    "stock_id": stock_ids.loc[invalid_idx].astype(str),
+                }
+            )
+            tmp = tmp.sort_values(["date", "stock_id"], kind="mergesort")
+            tmp["rank"] = tmp.groupby("date").cumcount() + 1
+            tmp["count"] = tmp.groupby("date")["stock_id"].transform("count")
+            jitter = (tmp["rank"] / (tmp["count"] + 1.0)) * spread_max
+            filled.loc[tmp.index] = filled.loc[tmp.index] - jitter
+    filled = filled.replace([np.inf, -np.inf], np.nan)
+    return filled.fillna(fallback)
 
 
 def _resolve_price_column(df: pd.DataFrame) -> str:
@@ -363,7 +617,7 @@ def _extract_cfo_from_long_cfs(cfs: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# value_pe：由 PE 倒數構造 value 因子
+# value_pe：由 earnings yield 做 signed log1p + soft winsor 構造 value 因子
 # ---------------------------------------------------------------------------
 
 
@@ -373,15 +627,21 @@ def compute_value_pe(
     min_pe: float = 0.1,
     max_pe: float = 100.0,
     eps: float = 1e-12,
+    prices: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
     從 per 銀河表計算 value_pe 因子。
 
     參數：
-    - per   ：必須包含 date / stock_id / 某個 PE 類欄位。
-    - min_pe：小於等於這個值的 PE 視為不可信（設 NaN）。
-    - max_pe：大於等於這個值的 PE 視為極端（設 NaN）。
+    - per   ：必須包含 date / stock_id / PE 類欄位（或可用 EPS_TTM + price 重算）。
+    - min_pe：保留相容參數（不做全域硬 clipping）。
+    - max_pe：保留相容參數（不做全域硬 clipping）。
     - eps   ：避免除以 0 的微小補值。
+    - prices：可選，若提供則以 prices 的日期做 asof 對齊。
+
+    計算規則：
+    - 若 per 含 EPS_TTM 或 EPS 與價格欄位，優先用 price / EPS 重算 PE。
+    - 若 per 含 net_income TTM 與市值或 shares，允許用 mktcap / net_income 作為 proxy。
 
     回傳：
     - df_factor：含 (date, stock_id, factor_value) 的 DataFrame。
@@ -391,31 +651,250 @@ def compute_value_pe(
 
     df = per.copy()
 
-    # 嘗試找出正確的 PE 欄位
-    pe_col = _pick_pe_column(df)
+    try:
+        pe_col = _pick_pe_column(df)
+    except ValueError:
+        pe_col = None
 
-    df = df[["date", "stock_id", pe_col]].rename(columns={pe_col: "pe_raw"})
-    df["pe_raw"] = pd.to_numeric(df["pe_raw"], errors="coerce")
-    df["pe_raw"] = df["pe_raw"].replace([np.inf, -np.inf], np.nan)
+    try:
+        price_col_per = _resolve_price_column(df)
+    except KeyError:
+        price_col_per = None
 
-    # 移除不合理或極端的 PE（虧損、超大倍數）
-    df.loc[df["pe_raw"] <= 0, "pe_raw"] = np.nan
-    df.loc[df["pe_raw"] <= min_pe, "pe_raw"] = np.nan
-    df.loc[df["pe_raw"] >= max_pe, "pe_raw"] = np.nan
+    eps_ttm_col = _pick_eps_ttm_column(df)
+    eps_col = _pick_eps_column(df)
+    net_income_ttm_col = _pick_net_income_ttm_column(df)
+    net_income_col = _pick_net_income_column(df)
+    mktcap_col = _resolve_market_cap_column(df)
+    shares_col = _pick_shares_outstanding_column(df)
 
-    # -log(PE)：越便宜 → 分數越高，且縮小極端值影響
-    # 注意：這裡只對正 PE 計算，非正值已在上面被設為 NaN
-    df["value_raw"] = -np.log(df["pe_raw"] + eps)
+    if (
+        pe_col is None
+        and eps_ttm_col is None
+        and eps_col is None
+        and net_income_ttm_col is None
+        and net_income_col is None
+    ):
+        raise ValueError(
+            "Unable to locate PE-like or earnings inputs in per dataframe. "
+            f"Columns={list(df.columns)}"
+        )
 
-    # 依 date 做 winsor + z-score
+    cols = ["date", "stock_id"]
+    for col in [
+        pe_col,
+        price_col_per,
+        eps_ttm_col,
+        eps_col,
+        net_income_ttm_col,
+        net_income_col,
+        mktcap_col,
+        shares_col,
+    ]:
+        if col and col not in cols:
+            cols.append(col)
+
+    df = df[cols].copy()
+
+    numeric_cols = [
+        c for c in [
+            pe_col,
+            price_col_per,
+            eps_ttm_col,
+            eps_col,
+            net_income_ttm_col,
+            net_income_col,
+            mktcap_col,
+            shares_col,
+        ] if c
+    ]
+
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
+
+    df = df.dropna(subset=["date", "stock_id"])
+    df["stock_id"] = _normalize_stock_id_series(df["stock_id"])
+    df["stock_id"] = df["stock_id"].replace("", np.nan)
+    df = df.dropna(subset=["stock_id"])
+    df = df.sort_values(["stock_id", "date"], kind="mergesort")
+    df = df.drop_duplicates(subset=["date", "stock_id"], keep="last")
+
+    if numeric_cols:
+        # per-stock asof fill (<= date) to reduce NaN without lookahead
+        df[numeric_cols] = df.groupby("stock_id", group_keys=False)[numeric_cols].ffill()
+
+    eps_series = None
+    if eps_ttm_col and eps_col:
+        eps_series = df[eps_ttm_col].combine_first(df[eps_col])
+    elif eps_ttm_col:
+        eps_series = df[eps_ttm_col]
+    elif eps_col:
+        eps_series = df[eps_col]
+
+    net_income_series = None
+    if net_income_ttm_col and net_income_col:
+        net_income_series = df[net_income_ttm_col].combine_first(df[net_income_col])
+    elif net_income_ttm_col:
+        net_income_series = df[net_income_ttm_col]
+    elif net_income_col:
+        net_income_series = df[net_income_col]
+
+    df["eps_value"] = eps_series if eps_series is not None else np.nan
+    df["net_income_value"] = net_income_series if net_income_series is not None else np.nan
+    if mktcap_col:
+        df["market_cap_value"] = df[mktcap_col]
+    else:
+        df["market_cap_value"] = np.nan
+    if price_col_per:
+        df["price_per"] = df[price_col_per]
+    if shares_col:
+        df["shares_value"] = df[shares_col]
+    if pe_col:
+        df["pe_direct"] = df[pe_col]
+
+    sid_col = "stock_id"
+    date_col = "date"
+
+    def _prep_asof_frame(frame: pd.DataFrame) -> pd.DataFrame:
+        out = frame.copy()
+        out[date_col] = pd.to_datetime(out[date_col], errors="coerce")
+        out[sid_col] = out[sid_col].astype(str).str.strip()
+        out[sid_col] = _normalize_stock_id_series(out[sid_col])
+        out[sid_col] = out[sid_col].replace("", np.nan)
+        out = out.dropna(subset=[sid_col, date_col])
+        out = out.drop_duplicates([sid_col, date_col], keep="last")
+        out = out.sort_values([date_col, sid_col], kind="mergesort").reset_index(drop=True)
+        return out
+
+    use_prices = False
+    price_df = None
+    price_col_prices = None
+    if prices is not None and not prices.empty:
+        if date_col in prices.columns and sid_col in prices.columns:
+            price_df = prices.copy()
+            try:
+                price_col_prices = _resolve_price_column(price_df)
+            except KeyError:
+                price_col_prices = None
+
+            price_cols = [date_col, sid_col]
+            if price_col_prices:
+                price_cols.append(price_col_prices)
+            price_df = price_df[price_cols].copy()
+            if price_col_prices:
+                price_df[price_col_prices] = pd.to_numeric(
+                    price_df[price_col_prices],
+                    errors="coerce",
+                ).replace([np.inf, -np.inf], np.nan)
+            price_df = _prep_asof_frame(price_df)
+            if not price_df.empty:
+                use_prices = True
+
+    if use_prices:
+
+        per_cols = [
+            date_col,
+            sid_col,
+            "eps_value",
+            "net_income_value",
+            "market_cap_value",
+        ]
+        for name in ["price_per", "shares_value", "pe_direct"]:
+            if name in df.columns:
+                per_cols.append(name)
+        per_inputs = df[per_cols].copy()
+        price_df = price_df[[date_col, sid_col] + ([price_col_prices] if price_col_prices else [])]
+        if price_col_prices:
+            price_df = price_df.rename(columns={price_col_prices: "price"})
+        per_inputs = _prep_asof_frame(per_inputs)
+        price_df = _prep_asof_frame(price_df)
+        per_inputs = per_inputs.sort_values([date_col, sid_col], kind="mergesort")
+        price_df = price_df.sort_values([date_col, sid_col], kind="mergesort")
+
+        df = pd.merge_asof(
+            price_df,
+            per_inputs,
+            on=date_col,
+            by=sid_col,
+            direction="backward",
+            allow_exact_matches=True,
+        )
+
+    def _safe_divide(numer: pd.Series, denom: pd.Series) -> pd.Series:
+        out = pd.Series(np.nan, index=denom.index, dtype="float64")
+        denom_valid = denom.abs() > eps
+        out.loc[denom_valid] = numer.loc[denom_valid] / denom.loc[denom_valid]
+        return out
+
+    price_for_pe = None
+    if "price" in df.columns:
+        price_for_pe = df["price"]
+    if "price_per" in df.columns:
+        price_for_pe = (
+            df["price_per"]
+            if price_for_pe is None
+            else price_for_pe.combine_first(df["price_per"])
+        )
+
+    market_cap = df["market_cap_value"] if "market_cap_value" in df.columns else None
+    if market_cap is not None and "shares_value" in df.columns and price_for_pe is not None:
+        market_cap = market_cap.combine_first(price_for_pe * df["shares_value"])
+
+    pe_candidates: List[pd.Series] = []
+    if price_for_pe is not None and "eps_value" in df.columns:
+        pe_candidates.append(_safe_divide(price_for_pe, df["eps_value"]))
+    if market_cap is not None and "net_income_value" in df.columns:
+        pe_candidates.append(_safe_divide(market_cap, df["net_income_value"]))
+    if "pe_direct" in df.columns:
+        pe_candidates.append(df["pe_direct"])
+
+    if not pe_candidates:
+        raise ValueError(
+            "Unable to compute PE proxy from available columns. "
+            f"Columns={list(df.columns)}"
+        )
+
+    pe_raw = pd.Series(np.nan, index=df.index, dtype="float64")
+    for cand in pe_candidates:
+        cand = cand.replace([np.inf, -np.inf], np.nan)
+        pe_raw = pe_raw.combine_first(cand)
+
+    df["pe_raw"] = pe_raw
+    zero_mask = df["pe_raw"] == 0
+    df.loc[zero_mask, "pe_raw"] = np.nan
+    df["pe_raw"] = df.groupby("stock_id", group_keys=False)["pe_raw"].ffill()
+    df.loc[zero_mask, "pe_raw"] = np.nan
+    df = df.reset_index(drop=True)
+
+    invalid = ~np.isfinite(df["pe_raw"])
+    invalid |= df["pe_raw"].abs() <= eps
+
+    pe_raw = df["pe_raw"].copy()
+    pos_mask = pe_raw > 0
+    neg_mask = pe_raw < 0
+
+    # earnings yield with sign preservation
+    ey = pd.Series(np.nan, index=pe_raw.index, dtype="float64")
+    valid_mask = pos_mask | neg_mask
+    ey.loc[valid_mask] = 1.0 / pe_raw.loc[valid_mask]
+    df["value_raw"] = np.sign(ey) * np.log1p(np.abs(ey))
+    df.loc[invalid, "value_raw"] = np.nan
+
+    # 依 date 做 soft winsor + z-score（僅使用有效值）
     df["factor_value"] = (
         df.groupby("date", group_keys=False)["value_raw"]
-        .transform(_cs_winsorized_zscore)
+        .transform(_cs_soft_winsorized_zscore)
+    )
+
+    df["factor_value"] = _apply_invalid_floor_after_xform(
+        df["factor_value"],
+        df["date"],
+        invalid,
+        stock_ids=df["stock_id"],
     )
 
     # 清理結果
     out = df[["date", "stock_id", "factor_value"]].copy()
-    out = out.dropna(subset=["factor_value"])
     out = out.sort_values(["date", "stock_id"]).reset_index(drop=True)
     return out
 
@@ -833,7 +1312,7 @@ def run_value_factor(
     - prices 為 Optional，避免 TypeError。
 
     實作：
-    - value_pe：沿用 PE 倒數定義。
+    - value_pe：沿用 earnings yield + signed log1p 定義，並做 soft winsor 以降低尾端 ties。
     - value_cfy：現金流殖利率（CFO_TTM / 市值 或 CF_per_share / price）。
     """
     fid = (factor_id or kwargs.get("factor_id") or "value_pe").lower()
@@ -854,7 +1333,7 @@ def run_value_factor(
     min_pe = float(kwargs.get("min_pe", 0.1))
     max_pe = float(kwargs.get("max_pe", 100.0))
 
-    df_factor = compute_value_pe(per, min_pe=min_pe, max_pe=max_pe)
+    df_factor = compute_value_pe(per, min_pe=min_pe, max_pe=max_pe, prices=prices)
     return df_factor
 
 
