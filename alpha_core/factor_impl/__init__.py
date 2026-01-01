@@ -96,7 +96,9 @@ FACTOR_IMPL_REGISTRY: Dict[str, Optional[FactorImpl]] = {
     "amihud_20d": run_liquidity_factor,
     "liq_amihud_20d": run_liq_amihud_20d_factor,
     "liq_amihud_120d": run_liq_amihud_120d_factor,
-    "vol_10d": run_vol_factor\n    "vol_252d": run_vol_factor\n}
+        "vol_10d": run_vol_factor,
+    "vol_252d": run_vol_factor,
+}
 
 # ---------------------------
 # 設定：因子 → 需要的 input dataset
@@ -124,7 +126,9 @@ FACTOR_REQUIRED_INPUTS: Dict[str, List[str]] = {
     "liq_amihud_20d": ["prices"],
     "liq_amihud_120d": ["prices"],
     "micro_imbalance_20d": ["prices"],
-    "vol_10d": ["prices"],\n    "vol_252d": ["prices"],\n}
+        "vol_10d": ["prices"],
+    "vol_252d": ["prices"],
+}
 
 
 @dataclass
