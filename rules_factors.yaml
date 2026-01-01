@@ -312,6 +312,40 @@ factors:
       # max_corr: 0.70       # TODO: enable when corr_summary is wired into gating
     enabled: true
 
+
+  - factor_id: vol_10d
+    category: classic
+    description: "10-day realized volatility (inverse risk factor when used as low-vol)."
+    universe: tw_eq_investable
+    data_freq: daily
+    engine: ta_vol_v1
+    impl_notes: "Realized volatility computed from daily log-returns; engine uses rolling std with min_periods=window_days."
+    params:
+      window_days: 10
+    wf_windows: [6, 12, 24]
+    gate_rules:
+      min_rank_ic: 0.015
+      min_coverage: 0.95
+      # max_turnover: 0.25   # TODO: enable when turnover is available in factor_eval
+      # max_corr: 0.70       # TODO: enable when corr_summary is wired into gating
+    enabled: true
+
+  - factor_id: vol_252d
+    category: classic
+    description: "252-day realized volatility (inverse risk factor when used as low-vol)."
+    universe: tw_eq_investable
+    data_freq: daily
+    engine: ta_vol_v1
+    impl_notes: "Realized volatility computed from daily log-returns; engine uses rolling std with min_periods=window_days."
+    params:
+      window_days: 252
+    wf_windows: [12, 24]
+    gate_rules:
+      min_rank_ic: 0.015
+      min_coverage: 0.95
+      # max_turnover: 0.25   # TODO: enable when turnover is available in factor_eval
+      # max_corr: 0.70       # TODO: enable when corr_summary is wired into gating
+    enabled: true
   - factor_id: vol_60d
     category: classic
     description: "60-day realized volatility (inverse risk factor when used as low-vol)."
