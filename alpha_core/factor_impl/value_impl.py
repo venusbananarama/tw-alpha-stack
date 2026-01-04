@@ -64,10 +64,6 @@ except Exception:  # noqa: BLE001
 
 _PE_TOKEN_RE = re.compile(r"(^|[^a-z0-9])pe([^a-z0-9]|$)")
 _PER_TOKEN_RE = re.compile(r"(^|[^a-z0-9])per([^a-z0-9]|$)")
-_INVALID_VALUE_MARGIN = 1.0
-_INVALID_VALUE_FALLBACK = -10.0
-_INVALID_SPREAD_EPS = 1e-6
-
 
 def _pick_pe_column(df: pd.DataFrame) -> str:
     """
@@ -131,6 +127,45 @@ def _pick_pe_column(df: pd.DataFrame) -> str:
         "Unable to locate PE-like column in per dataframe. "
         f"Columns={list(df.columns)}"
     )
+
+
+def _pick_pbr_column(df: pd.DataFrame) -> Optional[str]:
+    """
+    Select a PBR-like column from per dataframe.
+    """
+    lower_map = {c.lower(): c for c in df.columns}
+    candidates: List[str] = [
+        "pbr",
+        "pb",
+        "p/b",
+        "pb_ratio",
+        "price_to_book",
+        "p_to_b",
+    ]
+    for name in candidates:
+        key = name.lower()
+        if key in lower_map:
+            return lower_map[key]
+    return None
+
+
+def _pick_dividend_yield_column(df: pd.DataFrame) -> Optional[str]:
+    """
+    Select a dividend yield column from per dataframe.
+    """
+    lower_map = {c.lower(): c for c in df.columns}
+    candidates: List[str] = [
+        "dividend_yield",
+        "dividend_yield_ttm",
+        "dividend_yield_12m",
+        "dividendyield",
+        "div_yield",
+    ]
+    for name in candidates:
+        key = name.lower()
+        if key in lower_map:
+            return lower_map[key]
+    return None
 
 
 def _pick_eps_ttm_column(df: pd.DataFrame) -> Optional[str]:
@@ -370,56 +405,6 @@ def _cs_soft_winsorized_zscore(
     return pd.Series(z, index=x.index)
 
 
-def _fill_invalid_with_floor(x: pd.Series, floor_q: float = 0.01) -> pd.Series:
-    """
-    Fill NaN values with a per-date floor (worst) value for stable ranking.
-    """
-    valid = x.dropna()
-    if valid.empty:
-        return pd.Series(np.nan, index=x.index)
-    floor = float(valid.quantile(floor_q))
-    return x.fillna(floor - _INVALID_VALUE_MARGIN)
-
-
-def _apply_invalid_floor_after_xform(
-    values: pd.Series,
-    dates: pd.Series,
-    invalid_mask: pd.Series,
-    *,
-    stock_ids: Optional[pd.Series] = None,
-    spread_eps: float = _INVALID_SPREAD_EPS,
-    fallback: float = _INVALID_VALUE_FALLBACK,
-) -> pd.Series:
-    """
-    Ensure invalid values are always below the valid cross-section after transforms,
-    with an optional tiny spread to reduce ties.
-    """
-    valid_values = values.where(~invalid_mask)
-    min_by_date = valid_values.groupby(dates).transform("min")
-    filled = values.copy()
-    filled.loc[invalid_mask] = (min_by_date - _INVALID_VALUE_MARGIN).loc[invalid_mask]
-    spread_max = spread_eps if np.isfinite(spread_eps) else 0.0
-    spread_max = max(spread_max, min(_INVALID_VALUE_MARGIN * 0.5, 5e-4))
-    spread_max = max(spread_max, 2e-4)
-    spread_max = min(spread_max, _INVALID_VALUE_MARGIN * 0.9)
-    if stock_ids is not None and spread_max > 0.0:
-        invalid_idx = invalid_mask[invalid_mask].index
-        if not invalid_idx.empty:
-            tmp = pd.DataFrame(
-                {
-                    "date": dates.loc[invalid_idx],
-                    "stock_id": stock_ids.loc[invalid_idx].astype(str),
-                }
-            )
-            tmp = tmp.sort_values(["date", "stock_id"], kind="mergesort")
-            tmp["rank"] = tmp.groupby("date").cumcount() + 1
-            tmp["count"] = tmp.groupby("date")["stock_id"].transform("count")
-            jitter = (tmp["rank"] / (tmp["count"] + 1.0)) * spread_max
-            filled.loc[tmp.index] = filled.loc[tmp.index] - jitter
-    filled = filled.replace([np.inf, -np.inf], np.nan)
-    return filled.fillna(fallback)
-
-
 def _resolve_price_column(df: pd.DataFrame) -> str:
     """
     嘗試從價格表找出價格欄位。
@@ -617,7 +602,7 @@ def _extract_cfo_from_long_cfs(cfs: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# value_pe：由 earnings yield 做 signed log1p + soft winsor 構造 value 因子
+# value_pe：由 PER/PBR/股利殖利率做 composite value 因子
 # ---------------------------------------------------------------------------
 
 
@@ -633,15 +618,17 @@ def compute_value_pe(
     從 per 銀河表計算 value_pe 因子。
 
     參數：
-    - per   ：必須包含 date / stock_id / PE 類欄位（或可用 EPS_TTM + price 重算）。
+    - per   ：必須包含 date / stock_id / PE/PBR/dividend_yield 任一欄位（PE 可用 EPS_TTM + price 重算）。
     - min_pe：保留相容參數（不做全域硬 clipping）。
     - max_pe：保留相容參數（不做全域硬 clipping）。
     - eps   ：避免除以 0 的微小補值。
     - prices：可選，若提供則以 prices 的日期做 asof 對齊。
 
     計算規則：
-    - 若 per 含 EPS_TTM 或 EPS 與價格欄位，優先用 price / EPS 重算 PE。
-    - 若 per 含 net_income TTM 與市值或 shares，允許用 mktcap / net_income 作為 proxy。
+    - PER：log1p(1/PER)，PBR：log1p(1/PBR)，DY：log1p(max(dividend_yield, 0))。
+    - 每日截面對三個 component 做 soft winsor + z-score，再用 0.2/0.6/0.2 加權。
+    - 若 per 含 EPS_TTM 或 EPS 與價格欄位，優先用 price / EPS 重算 PER。
+    - 若 per 含 net_income TTM 與市值或 shares，允許用 mktcap / net_income 作為 PER proxy。
 
     回傳：
     - df_factor：含 (date, stock_id, factor_value) 的 DataFrame。
@@ -655,6 +642,8 @@ def compute_value_pe(
         pe_col = _pick_pe_column(df)
     except ValueError:
         pe_col = None
+    pbr_col = _pick_pbr_column(df)
+    dy_col = _pick_dividend_yield_column(df)
 
     try:
         price_col_per = _resolve_price_column(df)
@@ -674,9 +663,11 @@ def compute_value_pe(
         and eps_col is None
         and net_income_ttm_col is None
         and net_income_col is None
+        and pbr_col is None
+        and dy_col is None
     ):
         raise ValueError(
-            "Unable to locate PE-like or earnings inputs in per dataframe. "
+            "Unable to locate PE/PBR/dividend inputs in per dataframe. "
             f"Columns={list(df.columns)}"
         )
 
@@ -690,6 +681,8 @@ def compute_value_pe(
         net_income_col,
         mktcap_col,
         shares_col,
+        pbr_col,
+        dy_col,
     ]:
         if col and col not in cols:
             cols.append(col)
@@ -706,6 +699,8 @@ def compute_value_pe(
             net_income_col,
             mktcap_col,
             shares_col,
+            pbr_col,
+            dy_col,
         ] if c
     ]
 
@@ -802,6 +797,9 @@ def compute_value_pe(
         for name in ["price_per", "shares_value", "pe_direct"]:
             if name in df.columns:
                 per_cols.append(name)
+        for name in [pbr_col, dy_col]:
+            if name and name in df.columns and name not in per_cols:
+                per_cols.append(name)
         per_inputs = df[per_cols].copy()
         price_df = price_df[[date_col, sid_col] + ([price_col_prices] if price_col_prices else [])]
         if price_col_prices:
@@ -864,34 +862,58 @@ def compute_value_pe(
     df.loc[zero_mask, "pe_raw"] = np.nan
     df["pe_raw"] = df.groupby("stock_id", group_keys=False)["pe_raw"].ffill()
     df.loc[zero_mask, "pe_raw"] = np.nan
-    df = df.reset_index(drop=True)
+    df = df.sort_values(["stock_id", "date"], kind="mergesort").reset_index(drop=True)
 
-    invalid = ~np.isfinite(df["pe_raw"])
-    invalid |= df["pe_raw"].abs() <= eps
+    pe_raw = df["pe_raw"].copy().replace([np.inf, -np.inf], np.nan)
+    per_valid = pe_raw.notna() & (pe_raw > 0) & (pe_raw.abs() > eps)
+    ey_raw = pd.Series(np.nan, index=pe_raw.index, dtype="float64")
+    ey_raw.loc[per_valid] = np.log1p(1.0 / pe_raw.loc[per_valid])
 
-    pe_raw = df["pe_raw"].copy()
-    pos_mask = pe_raw > 0
-    neg_mask = pe_raw < 0
+    pbr_raw = pd.Series(np.nan, index=df.index, dtype="float64")
+    if pbr_col and pbr_col in df.columns:
+        pbr_raw = df[pbr_col].copy()
+    pbr_raw = pbr_raw.replace([np.inf, -np.inf], np.nan)
+    pbr_valid = pbr_raw.notna() & (pbr_raw > 0)
+    bm_raw = pd.Series(np.nan, index=df.index, dtype="float64")
+    bm_raw.loc[pbr_valid] = np.log1p(1.0 / pbr_raw.loc[pbr_valid])
 
-    # earnings yield with sign preservation
-    ey = pd.Series(np.nan, index=pe_raw.index, dtype="float64")
-    valid_mask = pos_mask | neg_mask
-    ey.loc[valid_mask] = 1.0 / pe_raw.loc[valid_mask]
-    df["value_raw"] = np.sign(ey) * np.log1p(np.abs(ey))
-    df.loc[invalid, "value_raw"] = np.nan
+    dy_raw = pd.Series(np.nan, index=df.index, dtype="float64")
+    dy_valid = pd.Series(False, index=df.index)
+    if dy_col and dy_col in df.columns:
+        dy_series = df[dy_col].copy().replace([np.inf, -np.inf], np.nan)
+        dy_valid = dy_series.notna()
+        dy_raw.loc[dy_valid] = np.log1p(dy_series.loc[dy_valid].clip(lower=0))
 
-    # 依 date 做 soft winsor + z-score（僅使用有效值）
-    df["factor_value"] = (
-        df.groupby("date", group_keys=False)["value_raw"]
-        .transform(_cs_soft_winsorized_zscore)
+    z_ey = ey_raw.groupby(df["date"], group_keys=False).transform(
+        _cs_soft_winsorized_zscore
+    )
+    z_bm = bm_raw.groupby(df["date"], group_keys=False).transform(
+        _cs_soft_winsorized_zscore
+    )
+    z_dy = dy_raw.groupby(df["date"], group_keys=False).transform(
+        _cs_soft_winsorized_zscore
     )
 
-    df["factor_value"] = _apply_invalid_floor_after_xform(
-        df["factor_value"],
-        df["date"],
-        invalid,
-        stock_ids=df["stock_id"],
-    )
+    # Growth-oriented composite (PBR + DY)
+    # - PBR: use -z_bm (i.e., higher PBR => higher score)
+    # - DY : use -z_dy (i.e., lower dividend yield => higher score)
+    z_pbr_g = -z_bm
+    z_dy_g = -z_dy
+
+    components = pd.concat({"pbr": z_pbr_g, "dy": z_dy_g}, axis=1)
+    weights = pd.Series({"pbr": 0.8, "dy": 0.2})
+    value_score = components.mul(weights).sum(axis=1, min_count=1)
+
+    valid_any = pbr_valid | dy_valid
+    df["factor_value"] = value_score.where(valid_any, np.nan)
+
+    invalid_mask = ~valid_any
+    if invalid_mask.any():
+        min_by_date = df.groupby("date", group_keys=False)["factor_value"].transform(
+            "min"
+        )
+        replace_mask = invalid_mask & min_by_date.notna()
+        df.loc[replace_mask, "factor_value"] = min_by_date.loc[replace_mask] - 1e-4
 
     # 清理結果
     out = df[["date", "stock_id", "factor_value"]].copy()
