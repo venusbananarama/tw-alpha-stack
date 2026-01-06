@@ -192,8 +192,17 @@ def compute_turnover(
     if target_col is None:
         shares_df = _extract_shares_outstanding(shareholding)
         if not shares_df.empty:
-            df = df.sort_values(["stock_id", "date"])
-            shares_df = shares_df.sort_values(["stock_id", "date"])
+            df = df.copy()
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            df["stock_id"] = df["stock_id"].astype(str)
+            df = df.dropna(subset=["date", "stock_id"])
+            df = df.sort_values(["date", "stock_id"], kind="mergesort").reset_index(drop=True)
+
+            shares_df = shares_df.copy()
+            shares_df["date"] = pd.to_datetime(shares_df["date"], errors="coerce")
+            shares_df["stock_id"] = shares_df["stock_id"].astype(str)
+            shares_df = shares_df.dropna(subset=["date", "stock_id"])
+            shares_df = shares_df.sort_values(["date", "stock_id"], kind="mergesort").reset_index(drop=True)
             df = pd.merge_asof(
                 df,
                 shares_df,
