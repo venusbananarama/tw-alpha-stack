@@ -268,6 +268,7 @@ factors:
     impl_notes: "Shorter horizon momentum; implementation uses trading_days calendar and log-returns."
     params:
       lookback_days: 126
+      skip_recent_days: 21
     wf_windows: [6, 12]
     gate_rules:
       min_rank_ic: 0.02
@@ -410,6 +411,8 @@ factors:
     impl_notes: >
       Uses PER silver table; alpha_core.factor_impl normalizes PE columns and computes earnings yield (1/PE).
       Currently outputs daily-dated factor values; sector-neutralization is applied downstream in evaluation/combo.
+    params:
+      direction: invert
     wf_windows: [12, 24]
     gate_rules:
       min_rank_ic: 0.025

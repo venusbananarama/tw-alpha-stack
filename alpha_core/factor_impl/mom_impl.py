@@ -135,7 +135,12 @@ def _per_date_residual(
         z = vals - mean_resid
 
     # clip 在 ±5σ 避免極端值
-    z = np.clip(z, -5.0, 5.0)
+    is_mom6 = (group["factor_id"].astype(str).str.endswith("6m").any()
+               if "factor_id" in group.columns else False)
+    if is_mom6:
+        z = np.clip(z, -10.0, 10.0)
+    else:
+        z = np.clip(z, -5.0, 5.0)
 
     result = np.full_like(y, np.nan, dtype=float)
     result[mask] = z
@@ -248,7 +253,10 @@ def run_mom_factor(
             return df_resid
 
         wide = df_resid.pivot(index="date", columns="stock_id", values="factor_value")
-        wide = apply_xsection_xform(wide, strategy="zscore")
+        fid = str(params.get("factor_id") or "").strip().lower()
+        is_mom6 = (fid == "mom_6m") or str(fid).endswith("6m")
+        winsor_limits = None if is_mom6 else (0.01, 0.99)
+        wide = apply_xsection_xform(wide, strategy="zscore", winsor_limits=winsor_limits)
         long = wide.stack(dropna=True).reset_index()
         long.columns = ["date", "stock_id", "factor_value"]
         return long
@@ -273,7 +281,13 @@ def run_mom_factor(
     if "skip_recent_days" in params:
         skip_recent_days = int(params.get("skip_recent_days", 0))
     else:
-        skip_recent_days = 21 if lookback_days >= 252 else 0
+        if fid == "mom_6m" or fid.endswith("6m"):
+            skip_recent_days = 21
+        else:
+            skip_recent_days = 21 if lookback_days >= 252 else 0
+
+    if not fid and lookback_days == 126 and window <= 12:
+        fid = "mom_6m"
 
     min_history_param = params.get("min_history_days")
     if min_history_param is not None:
@@ -296,7 +310,9 @@ def run_mom_factor(
 
     # 橫斷面 winsorize + z-score，保留「越大越好」
     wide = df_mom.pivot(index="date", columns="stock_id", values="factor_value")
-    wide = apply_xsection_xform(wide, strategy="zscore")
+    is_mom6 = (fid == "mom_6m") or str(fid).endswith("6m")
+    winsor_limits = None if is_mom6 else (0.01, 0.99)
+    wide = apply_xsection_xform(wide, strategy="zscore", winsor_limits=winsor_limits)
     long = wide.stack(dropna=True).reset_index()
     long.columns = ["date", "stock_id", "factor_value"]
     return long

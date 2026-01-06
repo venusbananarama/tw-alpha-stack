@@ -9,7 +9,7 @@ date and columns are stock_ids (or equivalent cross-sectional units).
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -80,7 +80,7 @@ def rank_xsection(
 def apply_xsection_xform(
     panel: pd.DataFrame,
     strategy: str = "zscore",
-    winsor_limits: Tuple[float, float] = (0.01, 0.99),
+    winsor_limits: Optional[Tuple[float, float]] = (0.01, 0.99),
     clip_std: float | None = 5.0,
     min_valid_per_row: int = 3,
 ) -> pd.DataFrame:
@@ -94,17 +94,32 @@ def apply_xsection_xform(
         return panel
 
     def _transform_row(row: pd.Series) -> pd.Series:
-        s = winsorize_xsection(row, lower_q=winsor_limits[0], upper_q=winsor_limits[1])
+        s = row.astype(float).replace([np.inf, -np.inf], np.nan)
+        lo_f: Optional[float] = None
+        hi_f: Optional[float] = None
+        do_winsor = False
+        if winsor_limits is not None:
+            try:
+                lo_raw, hi_raw = winsor_limits
+                lo_f = float(lo_raw)
+                hi_f = float(hi_raw)
+            except Exception:
+                lo_f = None
+                hi_f = None
+            else:
+                do_winsor = (0.0 < lo_f < hi_f < 1.0)
+        if do_winsor and lo_f is not None and hi_f is not None:
+            s = winsorize_xsection(s, lower_q=lo_f, upper_q=hi_f)
 
         valid = s.replace([np.inf, -np.inf], np.nan).dropna()
         if valid.shape[0] < min_valid_per_row:
             return pd.Series(np.nan, index=row.index)
 
-        if strategy == "rank":
+        strat = str(strategy).strip().lower()
+        if strat == "rank":
             return rank_xsection(s, pct=True, center=True)
-        # default zscore
+        # default zscore (no rank-gauss / ppf path)
         return zscore_xsection(s, ddof=0, clip_std=clip_std)
 
     transformed = panel.apply(_transform_row, axis=1)
     return transformed
-
