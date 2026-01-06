@@ -127,6 +127,7 @@ def run_beta_factor(
     ret_panel = log_px.diff()
     ret_inf_count_total, ret_inf_ratio_total = _ratio_inf(ret_panel)
     ret_panel = _finite_df(ret_panel)
+    ret_panel = ret_panel.shift(1)
     ret_panel = ret_panel.dropna(how="all")
 
     if ret_panel.empty:
