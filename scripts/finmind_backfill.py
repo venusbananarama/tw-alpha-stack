@@ -203,8 +203,32 @@ def write_silver(df: pd.DataFrame, root: str, kind: str) -> int:
     for ym, g in df.groupby("yyyymm"):
         outdir = os.path.join(root, "silver", "alpha", kind, f"yyyymm={ym}")
         os.makedirs(outdir, exist_ok=True)
-        out = os.path.join(outdir, f"ing_{kind}_{ym}_{int(time.time() * 1000)}.parquet")
-        g.drop(columns=["yyyymm"], errors="ignore").to_parquet(out, index=False)
+        out = os.path.join(outdir, "data.parquet")
+        g = g.drop(columns=["yyyymm"], errors="ignore")
+        if os.path.exists(out):
+            try:
+                prev = pd.read_parquet(out)
+            except Exception:
+                prev = pd.DataFrame()
+            if prev is not None and not prev.empty:
+                g = pd.concat([prev, g], ignore_index=True)
+
+        if "stock_id" in g.columns:
+            dedupe_keys = ["date", "stock_id"]
+        elif "symbol" in g.columns:
+            dedupe_keys = ["date", "symbol"]
+        else:
+            dedupe_keys = ["date"]
+
+        g = g.drop_duplicates(subset=dedupe_keys, keep="last")
+        if "stock_id" in g.columns:
+            g = g.sort_values(["date", "stock_id"])
+        elif "symbol" in g.columns:
+            g = g.sort_values(["date", "symbol"])
+        else:
+            g = g.sort_values(["date"])
+
+        g.to_parquet(out, index=False)
         total += len(g)
 
     return total
