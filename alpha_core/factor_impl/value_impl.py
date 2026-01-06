@@ -612,6 +612,7 @@ def compute_value_pe(
     min_pe: float = 0.1,
     max_pe: float = 100.0,
     eps: float = 1e-12,
+    direction: Optional[str] = None,
     prices: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
@@ -622,6 +623,7 @@ def compute_value_pe(
     - min_pe：保留相容參數（不做全域硬 clipping）。
     - max_pe：保留相容參數（不做全域硬 clipping）。
     - eps   ：避免除以 0 的微小補值。
+    - direction：可選方向控制（invert/reverse 代表最後翻轉符號）。
     - prices：可選，若提供則以 prices 的日期做 asof 對齊。
 
     計算規則：
@@ -894,17 +896,11 @@ def compute_value_pe(
         _cs_soft_winsorized_zscore
     )
 
-    # Growth-oriented composite (PBR + DY)
-    # - PBR: use -z_bm (i.e., higher PBR => higher score)
-    # - DY : use -z_dy (i.e., lower dividend yield => higher score)
-    z_pbr_g = -z_bm
-    z_dy_g = -z_dy
-
-    components = pd.concat({"pbr": z_pbr_g, "dy": z_dy_g}, axis=1)
-    weights = pd.Series({"pbr": 0.8, "dy": 0.2})
+    components = pd.concat({"ey": z_ey, "bm": z_bm, "dy": z_dy}, axis=1)
+    weights = pd.Series({"ey": 0.2, "bm": 0.6, "dy": 0.2})
     value_score = components.mul(weights).sum(axis=1, min_count=1)
 
-    valid_any = pbr_valid | dy_valid
+    valid_any = per_valid | pbr_valid | dy_valid
     df["factor_value"] = value_score.where(valid_any, np.nan)
 
     invalid_mask = ~valid_any
@@ -913,7 +909,11 @@ def compute_value_pe(
             "min"
         )
         replace_mask = invalid_mask & min_by_date.notna()
-        df.loc[replace_mask, "factor_value"] = min_by_date.loc[replace_mask] - 1e-4
+        df.loc[replace_mask, "factor_value"] = min_by_date.loc[replace_mask] - 1e-6
+
+    direction_norm = str(direction or "").strip().lower()
+    if direction_norm in {"invert", "reverse"}:
+        df["factor_value"] = -df["factor_value"]
 
     # 清理結果
     out = df[["date", "stock_id", "factor_value"]].copy()
@@ -1355,7 +1355,14 @@ def run_value_factor(
     min_pe = float(kwargs.get("min_pe", 0.1))
     max_pe = float(kwargs.get("max_pe", 100.0))
 
-    df_factor = compute_value_pe(per, min_pe=min_pe, max_pe=max_pe, prices=prices)
+    direction = kwargs.get("direction")
+    df_factor = compute_value_pe(
+        per,
+        min_pe=min_pe,
+        max_pe=max_pe,
+        prices=prices,
+        direction=direction,
+    )
     return df_factor
 
 

@@ -626,6 +626,11 @@ def _compute_fundamental_value_v1(
     if value_df.empty:
         return _empty_frame()
 
+    params = spec_map.get("params") or {}
+    direction = str(params.get("direction", "")).strip().lower()
+    if direction in {"invert", "reverse"}:
+        value_df["factor_value"] = -value_df["factor_value"]
+
     return (
         value_df.sort_values(["date", "stock_id"])
         .reset_index(drop=True)[["date", "stock_id", "factor_value"]]
@@ -1120,6 +1125,9 @@ def _compute_microstructure_v1(
         out = _maybe_filter_by_universe(out, root, universe, log)
         if out.empty:
             return _empty_frame()
+        direction = str(params.get("direction", "")).strip().lower()
+        if direction == "illiquid":
+            out["factor_value"] = -out["factor_value"]
         return (
             out.sort_values(["date", "stock_id"])
             .reset_index(drop=True)[["date", "stock_id", "factor_value"]]
