@@ -52,6 +52,415 @@ function Ensure-Dir([string]$Path) {
   }
 }
 
+function Convert-ToBoolOrFalse([object]$Value) {
+  if ($null -eq $Value) { return $false }
+  if ($Value -is [bool]) { return [bool]$Value }
+  $s = [string]$Value
+  if (-not $s) { return $false }
+  return $s.Trim().Equals("True", [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Write-PassFailFromDigTable {
+  param(
+    [string]$DigPath,
+    [string]$PassPath,
+    [string]$FailPath
+  )
+
+  $rows = Import-Csv $DigPath
+  $passRows = New-Object System.Collections.Generic.List[object]
+  $failRows = New-Object System.Collections.Generic.List[object]
+
+  foreach ($row in $rows) {
+    $okRank = Convert-ToBoolOrFalse $row.ok_rank_ic
+    $okCov  = Convert-ToBoolOrFalse $row.ok_coverage
+    $ok     = ($okRank -and $okCov)
+
+    $item = [pscustomobject]@{
+      factor_id = $row.factor_id
+      window    = $row.window_m
+      ok        = $ok
+    }
+
+    if ($ok) {
+      $passRows.Add($item)
+    }
+    else {
+      $failRows.Add($item)
+    }
+  }
+
+  "factor_id,window,ok" | Set-Content -Path $PassPath -Encoding UTF8
+  "factor_id,window,ok" | Set-Content -Path $FailPath -Encoding UTF8
+
+  if ($passRows.Count -gt 0) {
+    $passRows | Export-Csv -Path $PassPath -NoTypeInformation -Append -Encoding UTF8
+  }
+  if ($failRows.Count -gt 0) {
+    $failRows | Export-Csv -Path $FailPath -NoTypeInformation -Append -Encoding UTF8
+  }
+
+  return [pscustomobject]@{
+    pass_count = $passRows.Count
+    fail_count = $failRows.Count
+    total      = ($passRows.Count + $failRows.Count)
+  }
+}
+
+function Get-IntOrZero([object]$Value) {
+  if ($null -eq $Value) { return 0 }
+  try { return [int]$Value } catch { return 0 }
+}
+
+function Normalize-Windows([object]$Wins) {
+  if ($null -eq $Wins) { return @() }
+
+  if ($Wins -is [string]) {
+    return @(
+      ($Wins -split ',' |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -ne "" } |
+        ForEach-Object { [int]$_ })
+    )
+  }
+
+  return @($Wins)
+}
+
+function Get-FactorSloConfig {
+  param(
+    [string]$Root = ".",
+    [string]$Profile = "gate_prod",
+    [string]$Engine = "classic"
+  )
+
+  $fallback = @{
+    source                 = "gate_prod_default"
+    profile                = $Profile
+    engine                 = $Engine
+    min_factors            = 8
+    min_factors_per_window = 3
+    required_factors       = @("mom_6m","value_pe","quality_roeq")
+    per_window_min         = @{ "6" = 3; "12" = 3; "24" = 2 }
+  }
+
+  $rulesPath = Join-Path $Root "rules_factors.yaml"
+  if (-not (Test-Path $rulesPath)) { return $fallback }
+
+  $yamlCmd = Get-Command ConvertFrom-Yaml -ErrorAction SilentlyContinue
+  if (-not $yamlCmd) { return $fallback }
+
+  try {
+    $doc = Get-Content $rulesPath -Raw | ConvertFrom-Yaml
+  }
+  catch {
+    return $fallback
+  }
+
+  if (-not $doc -or -not $doc.gate_ready) { return [pscustomobject]$fallback }
+
+  $gateReady = $doc.gate_ready
+
+  $profileNode = $null
+  if ($Profile -and $gateReady.profiles) {
+    foreach ($p in $gateReady.profiles.PSObject.Properties) {
+      if ($p.Name -eq $Profile) { $profileNode = $p.Value; break }
+    }
+  }
+
+  $missingProfileCfg =
+    ($null -eq $profileNode) -or
+    ($profileNode -is [hashtable] -and $profileNode.Count -eq 0) -or
+    ($profileNode -is [pscustomobject] -and $profileNode.PSObject.Properties.Count -eq 0)
+
+  if ($missingProfileCfg) {
+    return [pscustomobject]$fallback
+  }
+
+  $merged = @{}
+  foreach ($k in $fallback.Keys) { $merged[$k] = $fallback[$k] }
+
+  $profilePairs = @()
+  if ($profileNode -is [hashtable]) {
+    foreach ($k in $profileNode.Keys) {
+      $profilePairs += ,@($k, $profileNode[$k])
+    }
+  }
+  else {
+    foreach ($p in $profileNode.PSObject.Properties) {
+      $profilePairs += ,@($p.Name, $p.Value)
+    }
+  }
+
+  foreach ($pair in $profilePairs) {
+    $k = $pair[0]
+    $v = $pair[1]
+    $isEmpty =
+      ($null -eq $v) -or
+      ($v -is [string] -and [string]::IsNullOrWhiteSpace($v)) -or
+      ($v -is [hashtable] -and $v.Count -eq 0) -or
+      ($v -is [System.Collections.IEnumerable] -and -not ($v -is [string]) -and (@($v).Count -eq 0))
+
+    if (-not $isEmpty) { $merged[$k] = $v }
+  }
+
+  $required = @()
+  $reqRaw = $merged["required_factors"]
+  if ($reqRaw) {
+    if ($reqRaw -is [string]) {
+      $v = $reqRaw.Trim()
+      if ($v) { $required += $v }
+    }
+    else {
+      foreach ($v in $reqRaw) {
+        if ($null -eq $v) { continue }
+        $s = [string]$v
+        if ($s) { $required += $s.Trim() }
+      }
+    }
+  }
+
+  $perWindowMin = @{}
+  $perWindowNode = $merged["per_window"]
+  if ($perWindowNode) {
+    foreach ($p in $perWindowNode.PSObject.Properties) {
+      $minVal = Get-IntOrZero $p.Value.min_factors
+      if ($minVal -gt 0) {
+        $perWindowMin[[string]$p.Name] = $minVal
+      }
+    }
+  }
+  elseif ($merged.ContainsKey("per_window_min")) {
+    $perWindowNode = $merged["per_window_min"]
+    if ($perWindowNode -is [hashtable]) {
+      foreach ($k in $perWindowNode.Keys) {
+        $minVal = Get-IntOrZero $perWindowNode[$k]
+        if ($minVal -gt 0) {
+          $perWindowMin[[string]$k] = $minVal
+        }
+      }
+    }
+    else {
+      foreach ($p in $perWindowNode.PSObject.Properties) {
+        $minVal = Get-IntOrZero $p.Value
+        if ($minVal -gt 0) {
+          $perWindowMin[[string]$p.Name] = $minVal
+        }
+      }
+    }
+  }
+
+  return [pscustomobject]@{
+    source                 = "rules_factors.yaml"
+    profile                = $Profile
+    engine                 = $Engine
+    min_factors            = Get-IntOrZero $merged["min_factors"]
+    min_factors_per_window = Get-IntOrZero $merged["min_factors_per_window"]
+    required_factors       = $required
+    per_window_min         = $perWindowMin
+  }
+}
+
+function Build-FactorSloResult {
+  param(
+    [string[]]$PassFactors,
+    [hashtable]$FactorWindows,
+    [object]$Windows,
+    [object]$Config
+  )
+
+  if (-not $Config) { return $null }
+
+  $winsArr = Normalize-Windows $Windows
+  $perWindowCounts = [ordered]@{}
+  foreach ($w in $winsArr) {
+    $perWindowCounts["$w"] = 0
+  }
+
+  foreach ($fid in $PassFactors) {
+    $wins = $null
+    if ($FactorWindows.ContainsKey($fid)) { $wins = $FactorWindows[$fid] }
+
+    if ($wins -and $wins.Count -gt 0) {
+      foreach ($w in $winsArr) {
+        if ($wins.Contains([string]$w)) {
+          $perWindowCounts["$w"] = Get-IntOrZero $perWindowCounts["$w"]
+          $perWindowCounts["$w"] += 1
+        }
+      }
+    }
+    else {
+      foreach ($w in $winsArr) {
+        $perWindowCounts["$w"] = Get-IntOrZero $perWindowCounts["$w"]
+        $perWindowCounts["$w"] += 1
+      }
+    }
+  }
+
+  $missingRequired = @()
+  foreach ($rf in $Config.required_factors) {
+    if ($PassFactors -notcontains $rf) {
+      $missingRequired += $rf
+    }
+  }
+
+  $satisfied = $true
+  if ($Config.min_factors -gt 0 -and $PassFactors.Count -lt $Config.min_factors) {
+    $satisfied = $false
+  }
+
+  foreach ($w in $winsArr) {
+    $count = Get-IntOrZero $perWindowCounts["$w"]
+    $wKey = [string]$w
+    $specific = 0
+    if ($Config.per_window_min.ContainsKey($wKey)) {
+      $specific = Get-IntOrZero $Config.per_window_min[$wKey]
+    }
+    $effective = [Math]::Max([int]$Config.min_factors_per_window, $specific)
+    if ($effective -gt 0 -and $count -lt $effective) {
+      $satisfied = $false
+    }
+  }
+
+  if ($missingRequired.Count -gt 0) {
+    $satisfied = $false
+  }
+
+  return [ordered]@{
+    name                    = "factor_gate_ready"
+    profile                 = $Config.profile
+    engine                  = $Config.engine
+    source                  = $Config.source
+    wf_summary_path         = ""
+    min_factors             = $Config.min_factors
+    min_factors_per_window  = $Config.min_factors_per_window
+    per_window_min          = $Config.per_window_min
+    required_factors        = $Config.required_factors
+    total_factors           = $PassFactors.Count
+    windows                 = @($winsArr)
+    per_window_counts       = $perWindowCounts
+    missing_required_factors = $missingRequired
+    satisfied               = $satisfied
+  }
+}
+
+function Update-WFSummaryFromPassResults {
+  param(
+    [object]$Wf,
+    [object[]]$PassRows,
+    [int[]]$Windows,
+    [string]$Root = ".",
+    [string]$Profile = "gate_prod",
+    [string]$Engine = "classic"
+  )
+
+  $factorWindows = @{}
+  foreach ($row in $PassRows) {
+    $fid = $null
+    if ($row.PSObject.Properties.Name -contains 'factor_id') {
+      $fid = $row.factor_id
+    }
+    if (-not $fid) { continue }
+    $fid = ([string]$fid).Trim()
+    if (-not $fid) { continue }
+
+    if (-not $factorWindows.ContainsKey($fid)) {
+      $factorWindows[$fid] = New-Object System.Collections.Generic.HashSet[string]
+    }
+
+    $winVal = $null
+    if ($row.PSObject.Properties.Name -contains 'window') {
+      $winVal = $row.window
+    }
+    elseif ($row.PSObject.Properties.Name -contains 'window_m') {
+      $winVal = $row.window_m
+    }
+
+    if ($winVal -ne $null) {
+      $winStr = ([string]$winVal).Trim()
+      if ($winStr) {
+        [void]$factorWindows[$fid].Add($winStr)
+      }
+    }
+  }
+
+  if ($factorWindows.Count -eq 0) { return $false }
+
+  $passIds = @($factorWindows.Keys | Sort-Object)
+
+  $passedMap = [ordered]@{}
+  foreach ($fid in $passIds) {
+    $wins = $factorWindows[$fid]
+    $winsArr = Normalize-Windows $wins
+    $winList = @()
+    if ($winsArr -and $winsArr.Count -gt 0) {
+      $winList = @(
+        $winsArr | Sort-Object -Unique
+      )
+    }
+    $payload = if ($winList.Count -gt 0) {
+      [ordered]@{ windows = $winList }
+    }
+    else {
+      [ordered]@{}
+    }
+    $passedMap[$fid] = $payload
+  }
+
+  if ($Wf.PSObject.Properties.Name -contains 'factors_by_status') {
+    $fbs = $Wf.factors_by_status
+    if (-not $fbs) {
+      $fbs = [pscustomobject]@{}
+      $Wf.factors_by_status = $fbs
+    }
+  }
+  else {
+    $fbs = [pscustomobject]@{}
+    Add-Member -InputObject $Wf -MemberType NoteProperty -Name 'factors_by_status' -Value $fbs
+  }
+
+  if ($fbs.PSObject.Properties.Name -contains 'passed') {
+    $fbs.passed = $passedMap
+  }
+  else {
+    Add-Member -InputObject $fbs -MemberType NoteProperty -Name 'passed' -Value $passedMap
+  }
+
+  if ($Wf.PSObject.Properties.Name -contains 'roster') {
+    $roster = $Wf.roster
+    if (-not $roster) {
+      $roster = [pscustomobject]@{}
+      $Wf.roster = $roster
+    }
+  }
+  else {
+    $roster = [pscustomobject]@{}
+    Add-Member -InputObject $Wf -MemberType NoteProperty -Name 'roster' -Value $roster
+  }
+
+  if ($roster.PSObject.Properties.Name -contains 'passed') {
+    $roster.passed = $passIds
+  }
+  else {
+    Add-Member -InputObject $roster -MemberType NoteProperty -Name 'passed' -Value $passIds
+  }
+
+  $cfg = Get-FactorSloConfig -Root $Root -Profile $Profile -Engine $Engine
+  if ($cfg) {
+    $slo = Build-FactorSloResult -PassFactors $passIds -FactorWindows $factorWindows -Windows $Windows -Config $cfg
+    if ($slo) {
+      if ($Wf.PSObject.Properties.Name -contains 'factor_slo') {
+        $Wf.factor_slo = $slo
+      }
+      else {
+        Add-Member -InputObject $Wf -MemberType NoteProperty -Name 'factor_slo' -Value $slo
+      }
+    }
+  }
+
+  return $true
+}
+
 function Get-AsOfDate {
   param(
     [string]$DateParam
@@ -197,6 +606,8 @@ function Compose-WFSummaryFromCsv([string]$Reports = ".\reports") {
   } else {
     Add-Member -InputObject $wfNode -MemberType NoteProperty -Name 'pass_rate' -Value ([double]$pr)
   }
+
+  [void](Update-WFSummaryFromPassResults -Wf $wf -PassRows $passes -Windows $windows -Root $Root -Profile "gate_prod" -Engine "classic")
 
   # 寫回 wf_summary.json（保留原本的 factors / factor_slo 等欄位）
   $wf | ConvertTo-Json -Depth 20 | Set-Content $wfPath -Encoding UTF8
@@ -404,6 +815,29 @@ function Invoke-Gate(
     $pass_rate = [double]$wf_overall.pass_rate
   } else {
     throw "wf_summary.json 缺少 pass_rate 欄位：$wfPath"
+  }
+
+  $passPath = Join-Path $Reports "pass_results.csv"
+  $needsSloInputs = $false
+  if (-not ($wf.PSObject.Properties.Name -contains 'factors_by_status')) {
+    $needsSloInputs = $true
+  }
+  elseif (-not $wf.factors_by_status -or -not ($wf.factors_by_status.PSObject.Properties.Name -contains 'passed')) {
+    $needsSloInputs = $true
+  }
+  if (-not ($wf.PSObject.Properties.Name -contains 'factor_slo')) {
+    $needsSloInputs = $true
+  }
+
+  if ($needsSloInputs -and (Test-Path $passPath)) {
+    $passRows = Import-Csv $passPath
+    $updated = Update-WFSummaryFromPassResults -Wf $wf -PassRows $passRows -Windows $wins -Root $Root -Profile "gate_prod" -Engine "classic"
+    if ($updated) {
+      $wf | ConvertTo-Json -Depth 20 | Set-Content $wfPath -Encoding UTF8
+      if (-not $Quiet) {
+        Write-Host "[SAFE] wf_summary 缺少 factor_slo inputs，已從 pass_results.csv 補齊" -ForegroundColor DarkYellow
+      }
+    }
   }
 
   $wf_pass_min       = 0.8
@@ -618,8 +1052,18 @@ else {
       Compose-WFSummaryFromCsv -Reports $Reports
     }
     else {
-      if (-not $Quiet) {
-        Write-Host "[SAFE] 未找到 PASS/FAIL CSV，改用原本 wf_summary.json（若存在）" -ForegroundColor DarkYellow
+      $digPath = Join-Path $Reports ("dig\\factor_dig_table.{0}.csv" -f $asOf)
+      if (Test-Path $digPath) {
+        $counts = Write-PassFailFromDigTable -DigPath $digPath -PassPath $pass -FailPath $fail
+        if (-not $Quiet) {
+          Write-Host ("[SAFE] 找不到 CSV 使用 dig_table 生成 生成到 {0}, {1} 生成筆數={2} (pass={3}, fail={4})" -f $pass, $fail, $counts.total, $counts.pass_count, $counts.fail_count) -ForegroundColor DarkYellow
+        }
+        Compose-WFSummaryFromCsv -Reports $Reports
+      }
+      else {
+        if (-not $Quiet) {
+          Write-Host "[SAFE] 未找到 PASS/FAIL CSV，改用原本 wf_summary.json（若存在）" -ForegroundColor DarkYellow
+        }
       }
     }
 
