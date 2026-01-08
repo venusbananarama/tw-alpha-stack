@@ -257,7 +257,7 @@ factors:
       # max_corr: 0.70       # TODO: enable when corr_summary is wired into gating
       psr_min: 0.90
       max_drawdown: 0.20
-    enabled: true
+    enabled: false
 
   - factor_id: mom_6m
     category: classic
@@ -269,7 +269,7 @@ factors:
     params:
       lookback_days: 126
       skip_recent_days: 21
-    wf_windows: [6, 12]
+    wf_windows: [6]
     gate_rules:
       min_rank_ic: 0.02
       min_coverage: 0.90
@@ -291,7 +291,7 @@ factors:
     gate_rules:
       min_rank_ic: 0.02
       min_coverage: 0.90
-    enabled: true
+    enabled: false
 
   # -------------------------------------------------------------------------
   # Volatility / Risk family
@@ -311,7 +311,7 @@ factors:
       min_coverage: 0.95
       # max_turnover: 0.25   # TODO: enable when turnover is available in factor_eval
       # max_corr: 0.70       # TODO: enable when corr_summary is wired into gating
-    enabled: true
+    enabled: false
 
 
   - factor_id: vol_10d
@@ -397,7 +397,7 @@ factors:
       min_coverage: 0.95
       # max_turnover: 0.20   # TODO: enable when turnover is available in factor_eval
       # max_corr: 0.80       # TODO: enable when corr_summary is wired into gating
-    enabled: true   # ta_beta_v1 已實作；dev/test 下先觀察，正式啟用前仍需 Gate 驗收
+    enabled: false  # ta_beta_v1 已實作；dev/test 下先觀察，正式啟用前仍需 Gate 驗收
 
   # -------------------------------------------------------------------------
   # Value family
@@ -413,7 +413,7 @@ factors:
       Currently outputs daily-dated factor values; sector-neutralization is applied downstream in evaluation/combo.
     params:
       direction: invert
-    wf_windows: [12, 24]
+    wf_windows: [12]
     gate_rules:
       min_rank_ic: 0.025
       min_coverage: 0.85
@@ -491,7 +491,7 @@ factors:
       min_coverage: 0.95
       # max_turnover: 0.15   # TODO: enable when turnover is available in factor_eval
       # max_corr: 0.80       # TODO: enable when corr_summary is wired into gating
-    enabled: true
+    enabled: false
 
   - factor_id: liq_amihud_20d
     category: classic
@@ -519,7 +519,7 @@ factors:
       min_coverage: 0.95
       # max_turnover: 0.15   # TODO: enable when turnover is available in factor_eval
       # max_corr: 0.80       # TODO: enable when corr_summary is wired into gating
-    enabled: true
+    enabled: false
 
   - factor_id: liq_amihud_120d
     category: classic
@@ -540,7 +540,7 @@ factors:
       min_coverage: 0.95
       # max_turnover: 0.15   # TODO: enable when turnover is available in factor_eval
       # max_corr: 0.80       # TODO: enable when corr_summary is wired into gating
-    enabled: true
+    enabled: false
 
   - factor_id: adv_20d
     category: classic
@@ -559,7 +559,7 @@ factors:
     gate_rules:
       min_rank_ic: 0.010
       min_coverage: 0.95
-    enabled: true
+    enabled: false
 
   - factor_id: amihud_20d
     category: classic
@@ -584,7 +584,7 @@ factors:
     gate_rules:
       min_rank_ic: 0.010
       min_coverage: 0.95
-    enabled: true
+    enabled: false
 
   - factor_id: size_log_mktcap
     category: classic
