@@ -1,10 +1,27 @@
-topN: 50
-rebalance: M
-fees: 0.0005
-slippage: 0.0005
-delay: 1
-start: "2015-01-01"
-end:   "2020-12-31"
-factor: composite_score
-price_col: ret
+calendar:
+  weekly_anchor: "W-FRI"
+  exec_delay_days: 1
+  as_of: null
+universe:
+  path: "configs/mini_universe.txt"
+  min_price: null
+  min_volume: null
+data:
+  prices_path: "datahub/silver/alpha/prices_daily.parquet"
+  benchmarks_path: null
+strategy:
+  topN: 50
+  rebalance: "W-FRI"
+  weighting: "equal"
+signal:
+  columns:
+    - "factor_value"
+  direction: "higher_is_better"
+costs:
+  fees_bps: 0.0
+  tax_bps: 0.0
+  slip_bps: 0.0
+portfolio:
+  initial_capital: 1000000.0
+  allow_cash: true
 

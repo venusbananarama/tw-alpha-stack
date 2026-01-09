@@ -1,7 +1,12 @@
-base:
-  config: "configs/backtest_topN_fixed.yaml"
-  factors: ["G:/AI/datahub/alpha/alpha_factors_fixed.parquet"]
-  topN: [10, 30]
-  fees_bps: [2.5]
-  tax_bps: [30]
-  extra: [""]
+base_config: "configs/backtest_topN_fixed.yaml"
+grid:
+  strategy.topN: [10, 20, 30]
+  costs.fees_bps: [0, 2.5]
+  costs.tax_bps: [0, 30]
+  costs.slip_bps: [5, 10]
+  calendar.exec_delay_days: [1]
+inputs:
+  factors_path: "datahub/silver/alpha/factor/sample_factors.parquet"
+reporting:
+  enabled: true
+  out_dir: "reports/factor_eval/topN_grid"
