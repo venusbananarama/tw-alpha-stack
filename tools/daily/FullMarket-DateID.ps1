@@ -154,6 +154,10 @@ begin {
         $End   = (Get-Date $Date).AddDays(1).ToString('yyyy-MM-dd')
     }
 
+    $UserPinnedRange = $PSBoundParameters.ContainsKey('Date') -or
+                       $PSBoundParameters.ContainsKey('Start') -or
+                       $PSBoundParameters.ContainsKey('End')
+
     $today = (Get-Date).Date
 
     $S = if ($Start) { [datetime]$Start } else { [datetime]'2004-01-01' }
@@ -174,6 +178,63 @@ begin {
     if ($E -gt $maxEnd) {
         $E = $maxEnd
         Write-Warning "End 超過未來，已裁到 $($E.ToString('yyyy-MM-dd'))"
+    }
+
+    # === 4.5 交易日行事曆（僅 gov_bank 使用） ===
+
+    $TradingDaysSet = $null
+
+    function Load-TradingDaysSet {
+        param(
+            [Parameter(Mandatory)][string]$Path
+        )
+        if (-not (Test-Path $Path)) {
+            throw "交易日檔不存在：$Path"
+        }
+
+        $rows = Import-Csv -Path $Path
+        if (-not $rows) {
+            throw "交易日檔 $Path 內容為空"
+        }
+
+        $props = $rows[0].PSObject.Properties.Name
+        $col = if ($props -contains 'date') { 'date' } else { $props[0] }
+
+        $set = @{}
+        foreach ($row in $rows) {
+            $raw = $row.$col
+            if (-not $raw) { continue }
+            $key = $raw.ToString().Trim()
+            if (-not $key) { continue }
+            try {
+                $key = (Get-Date -Date $key -ErrorAction Stop).ToString('yyyy-MM-dd')
+            }
+            catch {
+                throw "交易日檔 $Path 含無效日期：$raw"
+            }
+            $set[$key] = $true
+        }
+
+        if ($set.Count -eq 0) {
+            throw "交易日檔 $Path 內容為空"
+        }
+        return $set
+    }
+
+    function Is-TradingDay {
+        param(
+            [Parameter(Mandatory)][datetime]$Day
+        )
+        if (-not $TradingDaysSet) {
+            throw "交易日行事曆尚未載入"
+        }
+        $key = $Day.ToString('yyyy-MM-dd')
+        return $TradingDaysSet.ContainsKey($key)
+    }
+
+    if ($Datasets -contains 'gov_bank') {
+        $TradingDaysPath = Join-Path $DataRoot 'ref\trading_days.csv'
+        $TradingDaysSet = Load-TradingDaysSet -Path $TradingDaysPath
     }
 
     # === 5. .ok / ledger / 游標 helpers ===
@@ -197,6 +258,36 @@ begin {
         )
         $ok = Get-OkPath -root $root -ds $ds -d $d
         return (Test-Path $ok)
+    }
+
+    function Get-GovBankParquetPath {
+        param(
+            [Parameter(Mandatory)][datetime]$Day
+        )
+        $yyyymm = $Day.ToString('yyyyMM')
+        $dateStr = $Day.ToString('yyyy-MM-dd')
+        $rel = "silver\alpha\gov_bank\yyyymm=$yyyymm\gov_bank_$dateStr.parquet"
+        return Join-Path $DataRoot $rel
+    }
+
+    function ShouldSkip {
+        param(
+            [Parameter(Mandatory)][string]$ds,
+            [Parameter(Mandatory)][datetime]$d
+        )
+        if (-not $SkipIfOk) {
+            return $false
+        }
+        if ($ds -ne 'gov_bank') {
+            return (Has-Ok -root $CheckpointRoot -ds $ds -d $d)
+        }
+
+        $ok = Has-Ok -root $CheckpointRoot -ds $ds -d $d
+        if (-not $ok) {
+            return $false
+        }
+        $parquetPath = Get-GovBankParquetPath -Day $d
+        return (Test-Path $parquetPath)
     }
 
     function Write-Ok {
@@ -326,13 +417,23 @@ begin {
         $Sday = $Day.ToString('yyyy-MM-dd')
 
         if ($DryRun) {
-            $batches = Split-IdsToBatches -Ids $UniverseIds -BatchSize $BatchSize
+            if ($Dataset -eq 'gov_bank') {
+                $batches = ,@(@('ALL'))
+            }
+            else {
+                $batches = Split-IdsToBatches -Ids $UniverseIds -BatchSize $BatchSize
+            }
             $batchCount = $batches.Count
             Write-Host "[DRY] $Dataset $Sday | Universe=$($UniverseIds.Count) 批數=$batchCount BatchSize=$BatchSize" -ForegroundColor Cyan
             return
         }
 
-        $batches = Split-IdsToBatches -Ids $UniverseIds -BatchSize $BatchSize
+        if ($Dataset -eq 'gov_bank') {
+            $batches = ,@(@('ALL'))
+        }
+        else {
+            $batches = Split-IdsToBatches -Ids $UniverseIds -BatchSize $BatchSize
+        }
         $totalRetries = 0
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         $exitCode = 0
@@ -401,6 +502,12 @@ begin {
 
             $sw.Stop()
             $ms = [int]$sw.ElapsedMilliseconds
+            if ($Dataset -eq 'gov_bank') {
+                $parquetPath = Get-GovBankParquetPath -Day $Day
+                if (-not (Test-Path $parquetPath)) {
+                    throw "gov_bank parquet 不存在：$parquetPath"
+                }
+            }
             Write-Ok -root $CheckpointRoot -ds $Dataset -d $Day
             Write-Ledger -ds $Dataset -d $Day -qps $Qps -rpm $Rpm -exitCode 0 -retries $totalRetries -durationMs $ms -message ''
             Write-Host "完成 $Dataset $Sday 全部批次 OK （$([math]::Round($ms / 1000.0, 1)) 秒，重試 $totalRetries 次）" -ForegroundColor Green
@@ -430,7 +537,13 @@ begin {
     $Cursors = [ordered]@{}
     foreach ($ds in $Datasets) {
         # 先從 .ok 游標算出下一天，若沒有 .ok 就用 Start 當 fallback
-        $start0 = NextStartFromOk -ds $ds -fallback $S
+        # 若使用者明確指定區間，游標必須固定從 Start 開始
+        if ($UserPinnedRange) {
+            $start0 = $S
+        }
+        else {
+            $start0 = NextStartFromOk -ds $ds -fallback $S
+        }
 
         # 游標不得早於 Start（避免你指定 Start=某日還從更早開始跑）
         if ($start0 -lt $S) {
@@ -447,7 +560,10 @@ process {
         'single' {
             foreach ($ds in $Datasets) {
                 for ($d = $Cursors[$ds]; $d -lt $E; $d = $d.AddDays(1)) {
-                    if ($SkipIfOk -and (Has-Ok -root $CheckpointRoot -ds $ds -d $d)) {
+                    if ($ds -eq 'gov_bank' -and -not (Is-TradingDay -Day $d)) {
+                        continue
+                    }
+                    if (ShouldSkip -ds $ds -d $d) {
                         continue
                     }
                     Invoke-DateIdEngine-OneDay -Day $d -Dataset $ds -UniverseIds $UniverseIds
@@ -461,9 +577,17 @@ process {
                 foreach ($ds in $Datasets) {
                     $d = $Cursors[$ds]
 
-                    # SkipIfOk：一路往後找到下一個沒有 .ok 的日子
-                    while ($d -lt $E -and $SkipIfOk -and (Has-Ok -root $CheckpointRoot -ds $ds -d $d)) {
-                        $d = $d.AddDays(1)
+                    # SkipIfOk / 交易日：一路往後找到下一個可跑的日子
+                    while ($d -lt $E) {
+                        if ($ds -eq 'gov_bank' -and -not (Is-TradingDay -Day $d)) {
+                            $d = $d.AddDays(1)
+                            continue
+                        }
+                        if (ShouldSkip -ds $ds -d $d) {
+                            $d = $d.AddDays(1)
+                            continue
+                        }
+                        break
                     }
 
                     if ($d -lt $E) {

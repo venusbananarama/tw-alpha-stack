@@ -368,6 +368,78 @@ def _get_qps() -> float:
     return qps
 
 
+def fetch_gov_bank_merged(
+    spec: DateIdDatasetSpec,
+    date: dt.date,
+    ids: Iterable[str],
+) -> pd.DataFrame:
+    """
+    Fetch gov_bank records using FinMind merged daily API.
+
+    This endpoint uses dataset + start_date only and requires Bearer token
+    in Authorization header. The ids parameter is ignored.
+    """
+    base_url = _get_finmind_base_url()
+    token = _get_finmind_token()
+    date_str = date.isoformat()
+
+    params = {
+        "dataset": spec.finmind_name,
+        "start_date": date_str,
+    }
+    url = f"{base_url}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            payload_bytes = resp.read()
+    except urllib.error.HTTPError as exc:
+        raise DateIdApiError(
+            f"HTTPError for dataset={spec.key} date={date_str}: {exc}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise DateIdApiError(
+            f"URLError for dataset={spec.key} date={date_str}: {exc}"
+        ) from exc
+
+    try:
+        payload = json.loads(payload_bytes.decode("utf-8"))
+    except Exception as exc:
+        raise DateIdApiError(
+            f"Invalid JSON response for dataset={spec.key} date={date_str}: {exc}"
+        ) from exc
+
+    status = payload.get("status")
+    msg = payload.get("msg")
+    if status not in (200, "200"):
+        raise DateIdApiError(
+            f"FinMind error for dataset={spec.key} date={date_str}: "
+            f"status={status} msg={msg}"
+        )
+
+    data = payload.get("data")
+    if not data:
+        return pd.DataFrame()
+
+    if not isinstance(data, list):
+        raise DateIdApiError(
+            f"Unexpected 'data' format from FinMind for dataset={spec.key}: {type(data)}"
+        )
+
+    rows: List[Mapping[str, Any]] = []
+    for row in data:
+        if not isinstance(row, Mapping):
+            raise DateIdApiError(
+                f"Unexpected row type from FinMind for dataset={spec.key}: {type(row)}"
+            )
+        rows.append(dict(row))
+
+    return pd.DataFrame(rows)
+
+
 def fetch_dateid_raw(
     spec: DateIdDatasetSpec,
     date: dt.date,
@@ -377,8 +449,11 @@ def fetch_dateid_raw(
     Fetch raw records from FinMind for given dataset/date/ids.
 
     This uses the generic v4 'data_id' + 'start_date'/'end_date' pattern
-    for all dateID datasets.
+    for dateID datasets, except gov_bank uses merged daily endpoint.
     """
+    if spec.key == "gov_bank":
+        return fetch_gov_bank_merged(spec, date, ids)
+
     base_url = _get_finmind_base_url()
     token = _get_finmind_token()
     date_str = date.isoformat()
