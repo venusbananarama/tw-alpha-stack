@@ -50,6 +50,7 @@ param(
 begin {
     Set-StrictMode -Version Latest
     $ErrorActionPreference = 'Stop'
+    $script:NoWork = $false
 
     # === 1. 解析路徑：從 FullMarket.ps1 → tools → repo root ===
     $ScriptDir = if ($PSScriptRoot) {
@@ -173,9 +174,12 @@ begin {
 
     $calPath      = Get-TradingCalendarPath -RepoRoot $RepoRoot
     $calendar     = Import-TradingCalendar -CalendarPath $calPath
-    $TradingDays  = Get-TradingDaysInRange -Calendar $calendar -Start $S -End $E
+    $TradingDays  = @(Get-TradingDaysInRange -Calendar $calendar -Start $S -End $E)
     if (-not $TradingDays -or $TradingDays.Count -eq 0) {
         Write-Host "指定區間內沒有交易日，無需執行。" -ForegroundColor Yellow
+        $script:NoWork = $true
+        $script:TradingDays = @()
+        $script:Cursors = [ordered]@{}
         return
     }
     $TradingIndex = Build-TradingDayIndexMap -TradingDays $TradingDays
@@ -371,6 +375,7 @@ begin {
 }
 
 process {
+    if ($script:NoWork) { return }
     switch ($Mode) {
         'single' {
             foreach ($ds in $Datasets) {
