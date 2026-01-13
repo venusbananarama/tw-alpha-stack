@@ -170,6 +170,14 @@ def _normalize_prices(df: pd.DataFrame) -> Tuple[pd.DataFrame, str, Optional[str
     return out, "price", "volume" if vol_col else None
 
 
+def _build_price_panel(prices: pd.DataFrame) -> pd.DataFrame:
+    panel = prices.sort_values(["symbol", "date"]).copy()
+    panel = panel.rename(columns={"price": "close"})
+    panel["prev_close"] = panel.groupby("symbol")["close"].shift(1)
+    panel["ret"] = panel["close"] / panel["prev_close"] - 1.0
+    return panel[["date", "symbol", "close", "prev_close", "ret"]]
+
+
 def _infer_annualization_factor(dates: pd.Series) -> int:
     if len(dates) < 3:
         return 252
@@ -278,11 +286,8 @@ def _map_exec_dates(signal_dates: List[pd.Timestamp], trading_dates: List[pd.Tim
     tset = pd.Index(trading_dates)
     mapping: Dict[pd.Timestamp, pd.Timestamp] = {}
     for d in signal_dates:
-        if d not in tset:
-            idx = tset.searchsorted(d, side="right") - 1
-        else:
-            idx = tset.get_loc(d)
-        if idx < 0:
+        idx = tset.searchsorted(d, side="left")
+        if idx >= len(tset):
             continue
         exec_idx = idx + int(delay)
         if exec_idx >= len(tset):
@@ -370,18 +375,103 @@ def main() -> None:
     if not exec_map:
         raise SystemExit("No executable rebalance dates after applying exec_delay_days.")
 
+    price_panel = _build_price_panel(prices)
+
     exec_weights: List[pd.DataFrame] = []
     positions_rows: List[Dict] = []
     trades_rows: List[Dict] = []
     turnover_rows: List[Dict] = []
+    eligibility_drop_rows: List[pd.DataFrame] = []
+    eligibility_stats: List[Dict] = []
+    exec_dates_all: List[pd.Timestamp] = []
 
     prev_weights: Dict[str, float] = {}
     for sig_date in signal_dates:
         if sig_date not in exec_map:
             continue
         exec_date = exec_map[sig_date]
-        wdf = weights_by_signal_date[sig_date]
-        wdf = wdf.copy()
+        schedule_date = sig_date
+        wdf = weights_by_signal_date[sig_date].copy()
+        exec_dates_all.append(exec_date)
+
+        selected_before = int(len(wdf))
+        dropped = 0
+        selected_after = 0
+        dropped_by_reason = {
+            "missing_close": 0,
+            "missing_prev_close": 0,
+            "non_positive_close_or_prev": 0,
+            "nonfinite_ret": 0,
+        }
+        if not wdf.empty:
+            day_panel = price_panel[price_panel["date"] == exec_date][
+                ["symbol", "close", "prev_close", "ret"]
+            ]
+            wdf = wdf.merge(day_panel, on="symbol", how="left")
+
+            missing_close = wdf["close"].isna()
+            missing_prev = (~missing_close) & wdf["prev_close"].isna()
+            non_positive = (~missing_close) & (~missing_prev) & (
+                (wdf["close"] <= 0) | (wdf["prev_close"] <= 0)
+            )
+            nonfinite_ret = (
+                (~missing_close)
+                & (~missing_prev)
+                & (~non_positive)
+                & (~np.isfinite(wdf["ret"]))
+            )
+            eligible = ~(missing_close | missing_prev | non_positive | nonfinite_ret)
+            dropped = int((~eligible).sum())
+            selected_after = int(eligible.sum())
+            dropped_by_reason = {
+                "missing_close": int(missing_close.sum()),
+                "missing_prev_close": int(missing_prev.sum()),
+                "non_positive_close_or_prev": int(non_positive.sum()),
+                "nonfinite_ret": int(nonfinite_ret.sum()),
+            }
+
+            if not bool(eligible.all()):
+                reasons = pd.Series(
+                    np.select(
+                        [missing_close, missing_prev, non_positive | nonfinite_ret],
+                        [
+                            "missing_close",
+                            "missing_prev_close",
+                            "non_positive_close_or_prev",
+                        ],
+                        default="missing_prev_close",
+                    ),
+                    index=wdf.index,
+                )
+                drop_df = pd.DataFrame(
+                    {
+                        "exec_date": exec_date.date().isoformat(),
+                        "schedule_date": schedule_date.date().isoformat(),
+                        "symbol": wdf.loc[~eligible, "symbol"].astype(str).values,
+                        "reason": reasons.loc[~eligible].values,
+                    }
+                )
+                if not drop_df.empty:
+                    eligibility_drop_rows.append(drop_df)
+
+            wdf = wdf.loc[eligible, ["symbol", "weight"]]
+        else:
+            eligible = pd.Series([], dtype=bool)
+
+        weight_sum = float(wdf["weight"].sum()) if not wdf.empty else 0.0
+        cash_weight = max(0.0, 1.0 - weight_sum) if allow_cash else 0.0
+        eligibility_stats.append(
+            {
+                "exec_date": exec_date.date().isoformat(),
+                "schedule_date": schedule_date.date().isoformat(),
+                "selected_before": int(selected_before),
+                "selected_after": int(selected_after),
+                "dropped": int(dropped),
+                "dropped_by_reason": dropped_by_reason,
+                "cash_weight": float(cash_weight),
+            }
+        )
+
         wdf["exec_date"] = exec_date
         exec_weights.append(wdf)
 
@@ -429,7 +519,7 @@ def main() -> None:
     prices["ret"] = prices.groupby("symbol")["price"].pct_change().fillna(0.0)
     ret_df = prices[["date", "symbol", "ret"]].copy()
 
-    exec_dates = sorted(weights_df["exec_date"].unique().tolist())
+    exec_dates = sorted(set(exec_dates_all))
     date_map = pd.DataFrame({"date": sorted(ret_df["date"].unique())})
     date_map = date_map.sort_values("date")
     exec_map_df = pd.DataFrame({"exec_date": exec_dates}).sort_values("exec_date")
@@ -439,7 +529,9 @@ def main() -> None:
     ret_df = ret_df.merge(weights_df, on=["exec_date", "symbol"], how="left")
     ret_df["weight"] = ret_df["weight"].fillna(0.0)
 
-    weight_sum = weights_df.groupby("exec_date")["weight"].sum().rename("weight_sum")
+    weight_sum = weights_df.groupby("exec_date")["weight"].sum()
+    weight_sum = weight_sum.reindex(exec_dates, fill_value=0.0)
+    weight_sum = weight_sum.rename("weight_sum").reset_index()
     ret_df = ret_df.merge(weight_sum, on="exec_date", how="left")
     ret_df["weight_sum"] = ret_df["weight_sum"].fillna(0.0)
     if not allow_cash:
@@ -470,6 +562,36 @@ def main() -> None:
 
     pd.DataFrame(positions_rows).to_csv(out_dir / "positions.csv", index=False)
     pd.DataFrame(trades_rows).to_csv(out_dir / "trades.csv", index=False)
+
+    drops_df = (
+        pd.concat(eligibility_drop_rows, ignore_index=True)
+        if eligibility_drop_rows
+        else pd.DataFrame(columns=["exec_date", "schedule_date", "symbol", "reason"])
+    )
+    drops_df.to_csv(out_dir / "eligibility_drops.csv", index=False)
+
+    cash_weights = [row["cash_weight"] for row in eligibility_stats]
+    cash_stats: Dict[str, float] = {}
+    if cash_weights:
+        cash_stats = {
+            "min": float(np.min(cash_weights)),
+            "max": float(np.max(cash_weights)),
+            "mean": float(np.mean(cash_weights)),
+        }
+    dropped_by_reason_total: Dict[str, int] = {}
+    for entry in eligibility_stats:
+        bucket = entry.get("dropped_by_reason") or {}
+        for key, val in bucket.items():
+            dropped_by_reason_total[key] = dropped_by_reason_total.get(key, 0) + int(val)
+    summary = {
+        "rebalance_dates": int(len(eligibility_stats)),
+        "total_drops": int(len(drops_df)),
+        "drops_by_reason": drops_df["reason"].value_counts().to_dict() if not drops_df.empty else {},
+        "per_rebalance": eligibility_stats,
+        "cash_weight_stats": cash_stats,
+        "dropped_by_reason_total": dropped_by_reason_total,
+    }
+    (out_dir / "eligibility_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     metrics_net = _compute_metrics(nav_df["nav_net"], nav_df["date"])
     metrics_gross = _compute_metrics(nav_df["nav_gross"], nav_df["date"])
