@@ -173,24 +173,30 @@ begin {
 
     # === 4.1 交易日載入 ===
 
+    # Debug：確認目前 resolve 到哪個 Get-TradingDaysInRange（避免同名衝突）
     $gtd = Get-Command Get-TradingDaysInRange -All -ErrorAction SilentlyContinue
     Write-Host ("Resolve(Get-TradingDaysInRange) = " + (($gtd | Select-Object -First 1 | ForEach-Object { "$($_.Source)::$($_.Name) [$($_.CommandType)]" }) -join '; ')) -ForegroundColor DarkGray
 
-    $calPath  = & "$TradingModuleName\Get-TradingCalendarPath" -RepoRoot $RepoRoot
-    $calendar = & "$TradingModuleName\Import-TradingCalendar" -CalendarPath $calPath
+    $calPath        = & "$TradingModuleName\Get-TradingCalendarPath" -RepoRoot $RepoRoot
+    $calendar       = & "$TradingModuleName\Import-TradingCalendar" -CalendarPath $calPath
     $TradingDaysRaw = & "$TradingModuleName\Get-TradingDaysInRange" -Calendar $calendar -Start $S -End $E
+
+    # Normalize: 任何層級的 array 都攤平；最後強制 datetime + sort unique
     $TradingDays = @(
         $TradingDaysRaw |
+          Where-Object { $_ } |
           ForEach-Object { [datetime]$_ } |
           Sort-Object -Unique
     )
-    if (@($TradingDays).Count -eq 0) {
+
+    if (-not $TradingDays -or $TradingDays.Count -eq 0) {
         Write-Host "指定區間內沒有交易日，無需執行。" -ForegroundColor Yellow
         $script:NoWork = $true
         $script:TradingDays = @()
         $script:Cursors = [ordered]@{}
         return
     }
+
     $TradingIndex = & "$TradingModuleName\Build-TradingDayIndexMap" -TradingDays ([datetime[]]$TradingDays)
 
     # === 5. .ok / ledger helpers ===
