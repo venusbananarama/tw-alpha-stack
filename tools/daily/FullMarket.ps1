@@ -68,7 +68,8 @@ begin {
     # 匯入交易日共用模組
     $TradingModulePath = Join-Path $RepoRoot 'tools\common\TradingCalendar.psm1'
     if (Test-Path $TradingModulePath) {
-        Import-Module $TradingModulePath -Force
+        $TradingModule = Import-Module $TradingModulePath -Force -PassThru
+        $TradingModuleName = $TradingModule.Name
     }
     else {
         throw "找不到交易日模組：$TradingModulePath，請先建立 tools\common\TradingCalendar.psm1"
@@ -172,17 +173,25 @@ begin {
 
     # === 4.1 交易日載入 ===
 
-    $calPath      = Get-TradingCalendarPath -RepoRoot $RepoRoot
-    $calendar     = Import-TradingCalendar -CalendarPath $calPath
-    $TradingDays  = @(Get-TradingDaysInRange -Calendar $calendar -Start $S -End $E)
-    if (-not $TradingDays -or $TradingDays.Count -eq 0) {
+    $gtd = Get-Command Get-TradingDaysInRange -All -ErrorAction SilentlyContinue
+    Write-Host ("Resolve(Get-TradingDaysInRange) = " + (($gtd | Select-Object -First 1 | ForEach-Object { "$($_.Source)::$($_.Name) [$($_.CommandType)]" }) -join '; ')) -ForegroundColor DarkGray
+
+    $calPath  = & "$TradingModuleName\Get-TradingCalendarPath" -RepoRoot $RepoRoot
+    $calendar = & "$TradingModuleName\Import-TradingCalendar" -CalendarPath $calPath
+    $TradingDaysRaw = & "$TradingModuleName\Get-TradingDaysInRange" -Calendar $calendar -Start $S -End $E
+    $TradingDays = @(
+        $TradingDaysRaw |
+          ForEach-Object { [datetime]$_ } |
+          Sort-Object -Unique
+    )
+    if (@($TradingDays).Count -eq 0) {
         Write-Host "指定區間內沒有交易日，無需執行。" -ForegroundColor Yellow
         $script:NoWork = $true
         $script:TradingDays = @()
         $script:Cursors = [ordered]@{}
         return
     }
-    $TradingIndex = Build-TradingDayIndexMap -TradingDays $TradingDays
+    $TradingIndex = & "$TradingModuleName\Build-TradingDayIndexMap" -TradingDays ([datetime[]]$TradingDays)
 
     # === 5. .ok / ledger helpers ===
 
@@ -361,7 +370,7 @@ begin {
             $start0 = $S
         }
 
-        $idx = Find-NearestTradingIndex -IndexMap $TradingIndex -TradingDays $TradingDays -StartDate $start0
+        $idx = & "$TradingModuleName\Find-NearestTradingIndex" -IndexMap $TradingIndex -TradingDays $TradingDays -StartDate $start0
         $Cursors[$ds] = $idx
 
         if ($idx -ge 0) {
@@ -385,7 +394,7 @@ process {
                     continue
                 }
 
-                for (; $idx -lt $TradingDays.Count; $idx++) {
+                for (; $idx -lt @($TradingDays).Count; $idx++) {
                     $d = $TradingDays[$idx]
                     if ($SkipIfOk -and (Has-Ok -root $CheckpointRoot -ds $ds -d $d)) {
                         continue
@@ -403,11 +412,11 @@ process {
                 foreach ($ds in $Datasets) {
                     $idx = [int]$Cursors[$ds]
 
-                    if ($idx -lt 0 -or $idx -ge $TradingDays.Count) {
+                    if ($idx -lt 0 -or $idx -ge @($TradingDays).Count) {
                         continue
                     }
 
-                    while ($idx -lt $TradingDays.Count -and $SkipIfOk) {
+                    while ($idx -lt @($TradingDays).Count -and $SkipIfOk) {
                         $day = $TradingDays[$idx]
                         if (-not (Has-Ok -root $CheckpointRoot -ds $ds -d $day)) {
                             break
@@ -415,7 +424,7 @@ process {
                         $idx++
                     }
 
-                    if ($idx -ge $TradingDays.Count) {
+                    if ($idx -ge @($TradingDays).Count) {
                         $Cursors[$ds] = -1
                         continue
                     }
@@ -424,7 +433,7 @@ process {
                     Invoke-FinMind-OneDay -Day $runDay -Dataset $ds
 
                     $idx++
-                    $Cursors[$ds] = if ($idx -lt $TradingDays.Count) { $idx } else { -1 }
+                    $Cursors[$ds] = if ($idx -lt @($TradingDays).Count) { $idx } else { -1 }
                     $active = $true
                 }
             }

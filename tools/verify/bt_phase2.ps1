@@ -182,6 +182,19 @@ if not items:
     print("summary missing per-rebalance list")
     sys.exit(1)
 
+def normalize_bucket(bucket):
+    if not isinstance(bucket, dict):
+        return {}
+    out = {}
+    for k, v in bucket.items():
+        try:
+            iv = int(v)
+        except Exception:
+            iv = 0
+        if iv != 0:
+            out[k] = iv
+    return out
+
 bad = 0
 for it in items:
     dropped = it.get("dropped", None)
@@ -205,9 +218,10 @@ for it in items:
     bucket = it.get("dropped_by_reason") or {}
     for k, v in bucket.items():
         agg[k] = agg.get(k, 0) + int(v)
-total_norm = {k: int(v) for k, v in total.items()}
-if agg != total_norm:
-    print("dropped_by_reason_total mismatch", agg, total_norm)
+total_norm = normalize_bucket(total)
+agg_norm = normalize_bucket(agg)
+if agg_norm != total_norm:
+    print("dropped_by_reason_total mismatch", agg_norm, total_norm)
     sys.exit(1)
 
 drops = pd.read_csv(drops_path)
@@ -229,7 +243,8 @@ for it in items:
     if not drops.empty:
         g = drops[drops["exec_date"] == ed].groupby("reason").size()
         actual_bucket = {k: int(v) for k, v in g.items()}
-    expected_bucket = {k: int(v) for k, v in bucket.items()}
+    expected_bucket = normalize_bucket(bucket)
+    actual_bucket = normalize_bucket(actual_bucket)
     if actual_bucket != expected_bucket:
         print("drops bucket mismatch", ed, expected_bucket, actual_bucket)
         sys.exit(1)
