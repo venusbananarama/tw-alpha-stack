@@ -69,6 +69,13 @@ def _log_line(log_path: Optional[Path], message: str) -> None:
         return
 
 
+def _emit_resolved_paths(*, log_path: Optional[Path], print_stdout: bool, payload: Dict[str, object]) -> None:
+    line = "resolved_paths=" + json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    _log_line(log_path, line)
+    if print_stdout:
+        print(line)
+
+
 def _infer_col(df: pd.DataFrame, candidates: Iterable[str]) -> Optional[str]:
     cols = {c.lower(): c for c in df.columns}
     for cand in candidates:
@@ -367,6 +374,11 @@ def main() -> int:
     ap.add_argument("--ref-price-mode", default="last_trade_before")
     ap.add_argument("--window-sec", type=int, default=5)
     ap.add_argument("--tolerance-ms", type=int, default=None)
+    ap.add_argument(
+        "--print-resolved-paths",
+        action="store_true",
+        help="Print resolved paths (also always logged) for audit/debug.",
+    )
     ap.add_argument("--on-insufficient-data", choices=["fail", "skip", "force"], default="fail")
     ap.add_argument("--min-symbol-coverage", type=float, default=0.6)
     ap.add_argument("--min-trade-count", type=int, default=10)
@@ -586,6 +598,21 @@ def main() -> int:
             resolved_exec_trades_path = inputs.get("resolved_exec_trades_path")
             if resolved_exec_trades_path:
                 replay_exec_trades_path = Path(resolved_exec_trades_path)
+
+        resolved_payload = {
+            "as_of": as_of,
+            "bronze_dt_path": inputs.get("bronze_dt_path"),
+            "resolved_exec_trades_path": inputs.get("resolved_exec_trades_path"),
+            "replay_exec_trades_path": str(replay_exec_trades_path) if replay_exec_trades_path else None,
+            "exec_root": str(exec_root),
+            "bronze_root": str(bronze_root),
+            "out_dir": str(out_dir),
+        }
+        _emit_resolved_paths(
+            log_path=log_path,
+            print_stdout=bool(getattr(args, "print_resolved_paths", False)),
+            payload=resolved_payload,
+        )
 
         if args.mode in ("all", "replay"):
             _log_line(log_path, "stage_start:replay")
