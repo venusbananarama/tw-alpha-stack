@@ -3,7 +3,9 @@ import json
 import logging
 import os
 import re
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 try:
     from zoneinfo import ZoneInfo
@@ -14,6 +16,14 @@ except Exception:
 TIME_ONLY_RE = re.compile(r"^\d{2}:\d{2}:\d{2}(\.\d+)?$")
 
 
+def _infer_day_from_input_path(input_path: str):
+    dt_dir = Path(input_path).parent
+    match = re.match(r"^dt=(\d{4}-\d{2}-\d{2})$", dt_dir.name)
+    if match:
+        return match.group(1), dt_dir
+    return dt_dir.name, dt_dir
+
+
 def _parse_args():
     parser = argparse.ArgumentParser(description="Replay trades NDJSON into 1m bars.")
     parser.add_argument("--input", required=True, help="NDJSON input path.")
@@ -21,6 +31,11 @@ def _parse_args():
     parser.add_argument("--tz", default="Asia/Taipei", help="Timezone for bars.")
     parser.add_argument("--bar", default="1m", help="Bar size (only 1m).")
     parser.add_argument("--log-level", default="INFO", help="Logging level.")
+    parser.add_argument(
+        "--ignore-incomplete",
+        action="store_true",
+        help="Ignore _INCOMPLETE flag under dt=YYYY-MM-DD.",
+    )
     return parser.parse_args()
 
 
@@ -213,6 +228,12 @@ def _write_summary(path, summary):
 
 def main():
     args = _parse_args()
+    day, dt_dir = _infer_day_from_input_path(args.input)
+    if not args.ignore_incomplete:
+        flag = dt_dir / "_INCOMPLETE"
+        if flag.exists():
+            print(f"SKIP {day} (INCOMPLETE_INTRADAY) flag={flag}")
+            sys.exit(0)
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(message)s",

@@ -224,6 +224,23 @@ def _collect_manifest(paths: List[Path], *, report_path: Path) -> List[Dict[str,
     return manifest
 
 
+def _ensure_canonical_trades_copy(base_out_dir: Path) -> Optional[Path]:
+    root_path = base_out_dir / "trades.csv"
+    if root_path.exists():
+        return root_path
+    candidates = [
+        base_out_dir / "reconcile" / "trades.csv",
+        base_out_dir / "exec_run" / "trades.csv",
+        base_out_dir / "fubon_snapshot" / "trades.csv",
+    ]
+    for src in candidates:
+        if src.exists():
+            root_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, root_path)
+            return root_path
+    return None
+
+
 def _build_counts(
     *,
     exec_run_dir: Path,
@@ -661,6 +678,8 @@ def main() -> int:
         run_id=run_id,
     )
 
+    canonical_trades = _ensure_canonical_trades_copy(base_out_dir)
+
     manifest_paths = [
         exec_run_dir / "orders.csv",
         exec_run_dir / "trades.csv",
@@ -679,6 +698,8 @@ def main() -> int:
         bronze_root / "orders" / f"dt={as_of}" / f"orders_{run_id}.ndjson",
         bronze_root / "trades" / f"dt={as_of}" / f"trades_{run_id}.ndjson",
     ]
+    if canonical_trades is not None:
+        manifest_paths.append(canonical_trades)
     artefacts_manifest = _collect_manifest(manifest_paths, report_path=report_path)
 
     report = {
