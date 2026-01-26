@@ -746,50 +746,96 @@ def run(args: argparse.Namespace, *, repo_root: Optional[Path] = None) -> int:
             if not replay_stats_path.exists():
                 raise InputNotFoundError(f"replay stats missing: {replay_stats_path}")
             replay_stats = pd.read_parquet(replay_stats_path)
-            daily = compute_daily_drift_metrics(replay_stats, None, None)
-            monthly = aggregate_monthly_drift(daily)
-            gate = evaluate_drift_gate(monthly, median_threshold_pct=0.3)
-            if not monthly.empty:
-                write_parquet_atomic(monthly, out_dir / "drift_metrics.parquet")
+            drift_gate = None
+            drift_insufficient_detail = None
+            monthly = pd.DataFrame()
+            replay_metrics = {}
+
+            # WHY: drift can receive empty or schema-lite replay stats; downgrade to insufficient_data to keep all-mode flowing.
+            try:
+                if replay_stats is None or replay_stats.empty:
+                    drift_insufficient_detail = "empty_replay_stats"
+                elif "symbol" not in replay_stats.columns:
+                    drift_insufficient_detail = "missing_symbol_column"
+                else:
+                    daily = compute_daily_drift_metrics(replay_stats, None, None)
+                    if daily is None or daily.empty:
+                        drift_insufficient_detail = "empty_drift_metrics"
+                    else:
+                        monthly = aggregate_monthly_drift(daily)
+                        if monthly is None or monthly.empty:
+                            drift_insufficient_detail = "empty_drift_metrics"
+                        else:
+                            drift_gate = evaluate_drift_gate(monthly, median_threshold_pct=0.3)
+                            if not monthly.empty:
+                                write_parquet_atomic(monthly, out_dir / "drift_metrics.parquet")
+                            replay_row = replay_stats[replay_stats["symbol"] == "ALL"]
+                            if replay_row.empty:
+                                replay_row = replay_stats.iloc[[0]] if not replay_stats.empty else pd.DataFrame()
+                            if not replay_row.empty:
+                                replay_metrics = {
+                                    "p50_bps": replay_row["slippage_bps_p50"].iloc[0]
+                                    if "slippage_bps_p50" in replay_row.columns
+                                    else None,
+                                    "p95_bps": replay_row["slippage_bps_p95"].iloc[0]
+                                    if "slippage_bps_p95" in replay_row.columns
+                                    else None,
+                                }
+
+                            impact_path = out_dir / "exec" / "impact_calib.json"
+                            impact_metrics = {}
+                            if impact_path.exists():
+                                try:
+                                    impact_metrics = json.loads(impact_path.read_text(encoding="utf-8"))
+                                except Exception:
+                                    impact_metrics = {}
+
+                            summary = {
+                                "as_of": as_of,
+                                "run_id": args.exec_run_id,
+                                "status": drift_gate.get("status", "unknown"),
+                                "reason_code": "DRIFT_GATE",
+                                "gates": {"drift": drift_gate, "impact": impact_metrics.get("gate", {})},
+                                "metrics": {
+                                    "replay": replay_metrics,
+                                    "impact": {"mae_bps": impact_metrics.get("mae_bps")},
+                                },
+                            }
+                            html = render_drift_dashboard_html(
+                                summary,
+                                {"drift_monthly": monthly, "replay_stats": replay_stats},
+                            )
+                            atomic_write_text(out_dir / "live_drift_dashboard.html", html)
+            except KeyError as exc:
+                if exc.args and exc.args[0] == "symbol":
+                    drift_insufficient_detail = "missing_symbol_column"
+                else:
+                    raise
+
+            if drift_gate is None:
+                drift_gate = {
+                    "pass": False,
+                    "status": "insufficient_data",
+                    "median_pct": None,
+                }
             gates["drift"] = {
-                "pass": gate.get("pass"),
-                "status": gate.get("status"),
-                "median_pct": gate.get("median_pct"),
+                "pass": drift_gate.get("pass"),
+                "status": drift_gate.get("status"),
+                "median_pct": drift_gate.get("median_pct"),
                 "threshold_pct": 0.3,
             }
-            replay_row = replay_stats[replay_stats["symbol"] == "ALL"]
-            if replay_row.empty:
-                replay_row = replay_stats.iloc[[0]] if not replay_stats.empty else pd.DataFrame()
-            replay_metrics = {}
-            if not replay_row.empty:
-                replay_metrics = {
-                    "p50_bps": replay_row["slippage_bps_p50"].iloc[0],
-                    "p95_bps": replay_row["slippage_bps_p95"].iloc[0],
-                }
+            if drift_insufficient_detail:
+                gates["drift"]["detail"] = drift_insufficient_detail
 
-            impact_path = out_dir / "exec" / "impact_calib.json"
-            impact_metrics = {}
-            if impact_path.exists():
-                try:
-                    impact_metrics = json.loads(impact_path.read_text(encoding="utf-8"))
-                except Exception:
-                    impact_metrics = {}
-
-            summary = {
-                "as_of": as_of,
-                "run_id": args.exec_run_id,
-                "status": gate.get("status", "unknown"),
-                "reason_code": "DRIFT_GATE",
-                "gates": {"drift": gate, "impact": impact_metrics.get("gate", {})},
-                "metrics": {"replay": replay_metrics, "impact": {"mae_bps": impact_metrics.get("mae_bps")}},
-            }
-            html = render_drift_dashboard_html(summary, {"drift_monthly": monthly, "replay_stats": replay_stats})
-            atomic_write_text(out_dir / "live_drift_dashboard.html", html)
             _log_line(log_path, "stage_end:drift")
 
-            insufficient = gate.get("status") == "insufficient_data"
+            insufficient = drift_gate.get("status") == "insufficient_data"
             if insufficient:
-                if args.on_insufficient_data == "force":
+                # WHY: keep mode=all flowing on known drift input gaps.
+                if args.mode == "all" and drift_insufficient_detail:
+                    status = "WARN"
+                    reason_code = REASON_INSUFFICIENT_DATA
+                elif args.on_insufficient_data == "force":
                     status = "WARN"
                     reason_code = REASON_INSUFFICIENT_DATA
                 else:
@@ -797,7 +843,7 @@ def run(args: argparse.Namespace, *, repo_root: Optional[Path] = None) -> int:
                     reason_code = REASON_INSUFFICIENT_DATA
                     exit_code = int(ExitCode.GATE_FAILED)
                     raise GateFailedError("drift insufficient data")
-            if not insufficient and not gate.get("pass"):
+            if not insufficient and not drift_gate.get("pass"):
                 status = "FAIL"
                 reason_code = REASON_GATE_FAILED
                 exit_code = int(ExitCode.GATE_FAILED)
