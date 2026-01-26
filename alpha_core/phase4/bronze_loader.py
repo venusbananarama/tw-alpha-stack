@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set
@@ -37,6 +38,73 @@ _SYMBOL_STOPWORDS = {
 _FALLBACK_MIN_SYMBOLS = 1
 _FALLBACK_MAX_FILES = 20
 _FALLBACK_MAX_LINES = 200
+
+
+def _normalize_fubon_trade_obj(obj: Mapping[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize fubon bronze trade envelope into schema-first columns:
+    ts, symbol, price, qty.
+    If obj["data"] is a dict, prefer data.time/price/size/symbol.
+    """
+    data = obj.get("data")
+    src: Mapping[str, Any] = data if isinstance(data, dict) else obj
+
+    symbol = (
+        src.get("symbol")
+        or obj.get("symbol")
+        or obj.get("ticker")
+        or obj.get("stock_id")
+        or obj.get("code")
+    )
+    symbol = None if symbol is None else str(symbol).strip()
+
+    ts_raw = (
+        src.get("time")
+        or src.get("ts")
+        or src.get("timestamp")
+        or obj.get("time")
+        or obj.get("ts")
+        or obj.get("timestamp")
+    )
+
+    price = src.get("price") or obj.get("price")
+    qty = (
+        src.get("size")
+        or src.get("qty")
+        or src.get("quantity")
+        or obj.get("size")
+        or obj.get("qty")
+        or obj.get("quantity")
+    )
+
+    try:
+        price = None if price is None else float(price)
+    except Exception:
+        price = None
+
+    try:
+        qty = None if qty is None else int(qty)
+    except Exception:
+        qty = None
+
+    ts = None
+    if ts_raw is not None:
+        try:
+            v = float(ts_raw)
+            if not math.isfinite(v):
+                raise ValueError("ts_raw is not finite")
+            v_int = int(v)
+            if v_int > 10**14:
+                dt = pd.to_datetime(v_int, unit="us", utc=True)
+            elif v_int > 10**11:
+                dt = pd.to_datetime(v_int, unit="ms", utc=True)
+            else:
+                dt = pd.to_datetime(v_int, unit="s", utc=True)
+            ts = dt.tz_convert("Asia/Taipei").tz_localize(None)
+        except Exception:
+            ts = None
+
+    return {"ts": ts, "symbol": symbol, "price": price, "qty": qty}
 
 
 def detect_incomplete_flag(bronze_day_dir: Path) -> bool:
@@ -125,10 +193,11 @@ def load_bronze_trades(
             if not isinstance(obj, dict):
                 bad_lines += 1
                 continue
-            obj["_source_file"] = path.name
-            obj["_source_line"] = line_idx
-            obj["_source_file_order"] = file_idx
-            rows.append(obj)
+            norm = _normalize_fubon_trade_obj(obj)
+            norm["_source_file"] = path.name
+            norm["_source_line"] = line_idx
+            norm["_source_file_order"] = file_idx
+            rows.append(norm)
 
     if total_lines > 0:
         ratio = bad_lines / max(total_lines, 1)
