@@ -1,0 +1,42 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import IntEnum
+from typing import Dict, Optional
+
+
+class ExitCode(IntEnum):
+    PASS = 0
+    SKIP = 2
+    FAIL_INPUT = 10
+    FAIL_POLICY = 11
+    FAIL_RUNTIME = 12
+
+
+REASON_OK = "OK"
+REASON_SKIP_NON_TRADING_DAY = "SKIP_NON_TRADING_DAY"
+REASON_FAIL_MISSING_TARGET = "FAIL_MISSING_TARGET"
+REASON_FAIL_BAD_TARGET_SCHEMA = "FAIL_BAD_TARGET_SCHEMA"
+REASON_FAIL_MISSING_PRICES = "FAIL_MISSING_PRICES"
+REASON_FAIL_CASH_EXCEEDED = "FAIL_CASH_EXCEEDED"
+REASON_FAIL_CONCENTRATION_BREACH = "FAIL_CONCENTRATION_BREACH"
+REASON_FAIL_TURNOVER_BREACH = "FAIL_TURNOVER_BREACH"
+REASON_FAIL_RULES_INVALID = "FAIL_RULES_INVALID"
+REASON_FAIL_BAD_SNAPSHOT_SCHEMA = "FAIL_BAD_SNAPSHOT_SCHEMA"
+REASON_FAIL_LOCKED = "FAIL_LOCKED"
+REASON_FAIL_MISSING_BENCHMARK = "FAIL_MISSING_BENCHMARK"
+REASON_FAIL_TRACKING_ERROR = "FAIL_TRACKING_ERROR"
+REASON_FAIL_RISK_BUDGET = "FAIL_RISK_BUDGET"
+REASON_FAIL_OVERLAY = "FAIL_OVERLAY"
+REASON_FAIL_INTERNAL_ERROR = "FAIL_INTERNAL_ERROR"
+
+
+@dataclass
+class Phase6Error(Exception):
+    message: str
+    reason_code: str
+    exit_code: int
+    details: Optional[Dict[str, object]] = None
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return f"{self.reason_code}: {self.message}"

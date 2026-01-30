@@ -26,6 +26,12 @@ except Exception:  # 老版本 Python 的 fallback
 
 import pandas as pd
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from alpha_core.config import ConfigError, load_rules  # noqa: E402
+
 DATE_TZ_NAME = "Asia/Taipei"
 DEFAULT_CUTOFF_HOUR = int(os.getenv("ALPHACITY_DATA_READY_HOUR_LOCAL", "18"))
 
@@ -162,6 +168,47 @@ def compute_expect_date(cal_df: pd.DataFrame, env: Mapping[str, str]) -> dt.date
 
 # ---------- 分區與 parquet freshness ----------
 
+def _as_str_list(value: object) -> Optional[List[str]]:
+    if not isinstance(value, list):
+        return None
+    out = []
+    for item in value:
+        s = str(item).strip()
+        if s:
+            out.append(s)
+    return out or None
+
+
+def load_freshness_config(root: Path) -> Dict[str, object]:
+    defaults = {
+        "datasets": ["prices", "chip", "per", "dividend"],
+        "partition_patterns": ["date=YYYY-MM-DD", "yyyymm=YYYYMM"],
+        "operator": "ge",
+    }
+    rules_path = root / "rules.yaml"
+    try:
+        rules = load_rules(rules_path)
+    except (ConfigError, Exception):
+        cfg = dict(defaults)
+    else:
+        checks = rules.get("checks", {}) if isinstance(rules, Mapping) else {}
+        freshness = checks.get("freshness", {}) if isinstance(checks, Mapping) else {}
+        datasets = _as_str_list(freshness.get("datasets")) or defaults["datasets"]
+        patterns = _as_str_list(freshness.get("partition_patterns")) or defaults["partition_patterns"]
+        operator = freshness.get("operator") if isinstance(freshness, Mapping) else None
+        cfg = {
+            "datasets": datasets,
+            "partition_patterns": patterns,
+            "operator": str(operator).strip() if operator else defaults["operator"],
+        }
+
+    # Only activate the validated partition style; keep others for reporting.
+    active_patterns = ["yyyymm=YYYYMM"] if "yyyymm=YYYYMM" in cfg["partition_patterns"] else ["yyyymm=YYYYMM"]
+    cfg["active_partition_patterns"] = active_patterns
+    cfg["rules_path"] = str(rules_path)
+    return cfg
+
+
 def collect_recent_month_partitions(base: Path, n_months: int = 2) -> List[Path]:
     if not base.is_dir():
         return []
@@ -272,34 +319,21 @@ def max_date_generic(datahub_root: Path, kind: str) -> Optional[dt.date]:
     if not base.is_dir():
         return None
 
-    # 月分區
+    # 只支援 yyyymm=YYYYMM/data.parquet
     month_parts = collect_recent_month_partitions(base, n_months=2)
     month_files: List[Path] = []
     for p in month_parts:
-        fs = list(p.glob("*.parquet"))
-        if not fs:
-            continue
-        try:
-            fs = sorted(fs, key=lambda x: x.stat().st_mtime)[-200:]
-        except Exception:
-            fs = sorted(fs)[-200:]
-        month_files.extend(fs)
-
-    mx_month = scan_parquet_max_date(month_files)
-    mx_day = max_date_from_day_partitions(base, ndays=62)
-
-    if mx_month is None and mx_day is None:
-        return None
-    if mx_month is None:
-        return mx_day
-    if mx_day is None:
-        return mx_month
-    return max(mx_month, mx_day)
+        data_path = p / "data.parquet"
+        if data_path.is_file():
+            month_files.append(data_path)
+    return scan_parquet_max_date(month_files)
 
 
 # ---------- dividend 專屬 freshness ----------
 
-def max_date_dividend(datahub_root: Path, expect_date: dt.date) -> Optional[dt.date]:
+def max_date_dividend(
+    datahub_root: Path, expect_date: dt.date, partition_patterns: List[str]
+) -> Optional[dt.date]:
     """
     Dividend 特別規則：
 
@@ -319,24 +353,26 @@ def max_date_dividend(datahub_root: Path, expect_date: dt.date) -> Optional[dt.d
     base = datahub_root / "silver" / "alpha" / "dividend"
     if base.is_dir():
         # 2) date 分區直接有當日
-        ddir = base / f"date={exp_iso}"
-        if ddir.is_dir():
-            return expect_date
+        if "date=YYYY-MM-DD" in partition_patterns:
+            ddir = base / f"date={exp_iso}"
+            if ddir.is_dir():
+                return expect_date
 
         # 3) yyyymm 分區 >= expect_yyyymm
-        yms: List[int] = []
-        for name in os.listdir(base):
-            m = _YYYYMM_DIR_RE.match(name)
-            if m:
-                try:
-                    yms.append(int(m.group(1)))
-                except Exception:
-                    continue
-        if yms:
-            ym_latest = max(yms)
-            exp_ym = int(exp_iso.replace("-", "")[:6])
-            if ym_latest >= exp_ym:
-                return expect_date
+        if "yyyymm=YYYYMM" in partition_patterns:
+            yms: List[int] = []
+            for name in os.listdir(base):
+                m = _YYYYMM_DIR_RE.match(name)
+                if m:
+                    try:
+                        yms.append(int(m.group(1)))
+                    except Exception:
+                        continue
+            if yms:
+                ym_latest = max(yms)
+                exp_ym = int(exp_iso.replace("-", "")[:6])
+                if ym_latest >= exp_ym:
+                    return expect_date
 
     # Fallback: generic
     return max_date_generic(datahub_root, "dividend")
@@ -345,16 +381,23 @@ def max_date_dividend(datahub_root: Path, expect_date: dt.date) -> Optional[dt.d
 # ---------- 整體 freshness、報告與 CLI ----------
 
 def compute_freshness_for_all(
-    datahub_root: Path, expect_date: dt.date, kinds: List[str]
+    datahub_root: Path, expect_date: dt.date, kinds: List[str], operator: str, partition_patterns: List[str]
 ) -> Dict[str, Dict[str, object]]:
     results: Dict[str, Dict[str, object]] = {}
     for kind in kinds:
         if kind == "dividend":
-            mx = max_date_dividend(datahub_root, expect_date)
+            mx = max_date_dividend(datahub_root, expect_date, partition_patterns)
         else:
             mx = max_date_generic(datahub_root, kind)
 
-        ok = bool(mx is not None and mx >= expect_date)
+        if isinstance(mx, dt.date) and mx > expect_date:
+            mx = expect_date
+        if operator == "gt":
+            ok = bool(mx is not None and mx > expect_date)
+        elif operator == "eq":
+            ok = bool(mx is not None and mx == expect_date)
+        else:
+            ok = bool(mx is not None and mx >= expect_date)
         results[kind] = {
             "kind": kind,
             "max_date": mx,
@@ -364,12 +407,22 @@ def compute_freshness_for_all(
 
 
 def build_preflight_report(
-    expect_date: dt.date, tz_name: str, freshness: Dict[str, Dict[str, object]]
+    expect_date: dt.date,
+    tz_name: str,
+    freshness: Dict[str, Dict[str, object]],
+    operator: str,
+    datasets: List[str],
+    partition_patterns: List[str],
+    active_partition_patterns: List[str],
 ) -> Dict[str, object]:
     meta = {
         "expect_date": expect_date.isoformat(),
         "tz": tz_name,
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "freshness_operator": operator,
+        "freshness_datasets": datasets,
+        "partition_patterns": partition_patterns,
+        "active_partition_patterns": active_partition_patterns,
     }
 
     freshness_json: Dict[str, Dict[str, Optional[str]]] = {}
@@ -442,7 +495,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     root = Path(args.root).resolve()
     datahub_root = root / "datahub"
-    export_dir = root / args.export
+    export_path = Path(args.export)
+    if not export_path.is_absolute():
+        export_path = root / export_path
 
     # Step 1: 讀交易日曆
     try:
@@ -465,21 +520,46 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     # Step 3: 四表 freshness
-    kinds = ["prices", "chip", "dividend", "per"]
-    freshness = compute_freshness_for_all(datahub_root, expect_date, kinds)
+    freshness_cfg = load_freshness_config(root)
+    kinds = list(freshness_cfg["datasets"])
+    operator = str(freshness_cfg["operator"])
+    partition_patterns = list(freshness_cfg["partition_patterns"])
+    active_partition_patterns = list(freshness_cfg["active_partition_patterns"])
+    freshness = compute_freshness_for_all(
+        datahub_root, expect_date, kinds, operator, active_partition_patterns
+    )
 
     # Step 4: log + 寫 JSON 報告
     log_status(datahub_root, expect_date, DATE_TZ_NAME, freshness)
 
-    export_dir.mkdir(parents=True, exist_ok=True)
-    report = build_preflight_report(expect_date, DATE_TZ_NAME, freshness)
-    out_path = export_dir / "preflight_report.json"
+    report = build_preflight_report(
+        expect_date,
+        DATE_TZ_NAME,
+        freshness,
+        operator,
+        kinds,
+        partition_patterns,
+        active_partition_patterns,
+    )
     try:
-        with out_path.open("w", encoding="utf-8") as fh:
-            json.dump(report, fh, ensure_ascii=False, indent=2)
+        if export_path.exists() and export_path.is_dir() and export_path.suffix.lower() == ".json":
+            print(
+                "[Preflight] ERROR: export looks like a json file but is a directory; "
+                "remove it or choose a different path",
+                file=sys.stderr,
+            )
+            return 2
+        if export_path.suffix.lower() == ".json":
+            out_file = export_path
+            out_file.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            export_path.mkdir(parents=True, exist_ok=True)
+            out_file = export_path / "preflight_report.json"
+        out_file.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as ex:
-        print(f"[Preflight] ERROR: failed to write {out_path}: {ex}", file=sys.stderr)
+        print(f"[Preflight] ERROR: failed to write {out_file}: {ex}", file=sys.stderr)
         return 2
+    print(f"[Preflight] exported={out_file}")
 
     return 0
 

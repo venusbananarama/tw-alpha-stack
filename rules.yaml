@@ -46,7 +46,6 @@ ssot:
   tz: Asia/Taipei
 
 # BEGIN AUTO FRESHNESS (managed) - do not edit below
----
 checks:
   freshness:
     # 當前 Preflight 採用：max_date >= expect_date 視為 OK
@@ -57,3 +56,34 @@ checks:
       - "date=YYYY-MM-DD"
       - "yyyymm=YYYYMM"
 # END AUTO FRESHNESS (managed)
+phase6:
+  cash:
+    buffer_bps: 10
+    max_cash_usage_ratio: 1.0
+  concentration:
+    max_single_name_ratio: 0.20
+    topk_k: 5
+    max_topk_ratio: 0.60
+  turnover:
+    max_turnover_ratio: 1.00
+  freshness:
+    max_price_age_days: 7
+    max_snapshot_age_days: 7
+  benchmark:
+    returns_file: "reports/benchmarks/bench_0050_returns.parquet"
+  risk:
+    te_windows: [60, 120, 252]
+    min_obs: 10
+    enforce_te: false
+    enforce_ir: false
+    max_te:
+      "252": 0.10
+    min_ir:
+      "252": -999
+    max_single_name_rc: 0.20
+    max_topk_rc: 0.60
+    topk_k: 5
+  overlay:
+    enabled: true
+    policy: "scale"
+    trigger_on_warn_te: true
