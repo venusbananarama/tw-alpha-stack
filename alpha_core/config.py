@@ -118,6 +118,7 @@ class FactorDefinition:
     gate_rules: GateRule
     params: Dict[str, Any] = field(default_factory=dict)
     meta: Dict[str, Any] = field(default_factory=dict)
+    enabled: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +180,22 @@ def _to_int_list(value: Any, field_name: str) -> List[int]:
     return result
 
 
+def _to_bool_maybe(value: Any, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return True
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in {"1", "true", "t", "yes", "y", "on"}:
+            return True
+        if s in {"0", "false", "f", "no", "n", "off"}:
+            return False
+    raise ConfigError(f"{field_name} must be a boolean-like value, got {value!r}")
+
+
 def _load_yaml(path: str | Path) -> Any:
     """
     Generic YAML loader，現在只用在 rules.yaml，
@@ -217,7 +234,7 @@ def load_dataset_configs(rules: Mapping[str, Any]) -> Dict[str, DatasetConfig]:
 
     1) datasets:
          prices:
-           path_pattern: "datahub/silver/alpha/prices/yyyymm=YYYYMM/*.parquet"
+           path_pattern: "datahub/silver/alpha/prices/yyyymm=YYYYMM/data.parquet"
            partition_type: "yyyymm"
            freshness: {...}
          chip:
@@ -436,6 +453,13 @@ def _parse_factor_definition(raw: Mapping[str, Any]) -> FactorDefinition:
         )
     meta_dict: Dict[str, Any] = dict(meta)
 
+    if "enabled" in raw:
+        enabled = _to_bool_maybe(raw.get("enabled"), f"Factor {fid!r}: enabled")
+    elif "enabled" in meta_dict:
+        enabled = _to_bool_maybe(meta_dict.get("enabled"), f"Factor {fid!r}: meta.enabled")
+    else:
+        enabled = True
+
     return FactorDefinition(
         factor_id=fid,
         category=category,
@@ -449,6 +473,7 @@ def _parse_factor_definition(raw: Mapping[str, Any]) -> FactorDefinition:
         gate_rules=gate_rules,
         params=params_dict,
         meta=meta_dict,
+        enabled=enabled,
     )
 
 

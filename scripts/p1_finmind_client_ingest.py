@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-finmind_client_ingest.py
+p1_finmind_client_ingest.py
 
 FinMind 抓資料引擎 v2（單一入口）
 
@@ -30,12 +30,20 @@ import dataclasses
 import datetime as _dt
 import logging
 import os
+import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import requests
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from alpha_core.phase1 import rate_control  # noqa: E402
 
 # -----------------------------------------------------------------------------
 # 常數與 dataset alias
@@ -168,6 +176,10 @@ def load_config_from_env() -> FinMindConfig:
         raise FinMindConfigError(
             f"FINMIND_MAX_CONCURRENCY 必須 > 0, 目前={max_concurrency}"
         )
+
+    if _shared_bucket_enabled():
+        qps = max(qps, 2.0)
+        rpm = max(rpm, 120)
 
     return FinMindConfig(
         base_url=base_url,
@@ -308,6 +320,31 @@ def resolve_dataset_name(alias_or_name: str) -> str:
 # -----------------------------------------------------------------------------
 
 _logger = logging.getLogger(__name__)
+_SHARED_BUCKET: Optional[rate_control.SharedTokenBucket] = None
+_SHARED_BUCKET_READY = False
+
+
+def _shared_bucket_enabled() -> bool:
+    raw = (os.environ.get("FINMIND_SHARED_BUCKET") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _get_shared_bucket() -> Optional[rate_control.SharedTokenBucket]:
+    global _SHARED_BUCKET
+    global _SHARED_BUCKET_READY
+    if not _SHARED_BUCKET_READY:
+        _SHARED_BUCKET = rate_control.load_bucket_from_env(_REPO_ROOT)
+        _SHARED_BUCKET_READY = True
+        if _SHARED_BUCKET is not None:
+            _logger.info(
+                "shared bucket enabled rpm=%s burst=%s lease=%s max_wait=%s state=%s",
+                _SHARED_BUCKET.rpm,
+                _SHARED_BUCKET.burst,
+                _SHARED_BUCKET.lease_size,
+                _SHARED_BUCKET.max_wait_sec,
+                _SHARED_BUCKET.state_path,
+            )
+    return _SHARED_BUCKET
 
 
 def _send_request_once(
@@ -393,6 +430,10 @@ def _send_request_with_retry(
     for attempt in range(cfg.max_retries + 1):
         if stats is not None:
             stats.total_requests += 1
+
+        bucket = _get_shared_bucket()
+        if bucket is not None:
+            bucket.acquire()
 
         # 節流
         limiter.acquire()

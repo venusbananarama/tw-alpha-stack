@@ -1,5 +1,6 @@
 # File: tools/daily/FullMarket.ps1
 # Phase-1 FinMind 主線（四表）入口
+# DEPRECATED: use scripts/p1_daily_routine.py as the Phase-1 entrypoint.
 # 責任：
 #   - 驅動四個 dataset：prices/chip/per/dividend（或其子集）
 #   - 管理 RunType（backfill/live）、Mode（single/roundrobin）、日期半開區間 [Start,End)

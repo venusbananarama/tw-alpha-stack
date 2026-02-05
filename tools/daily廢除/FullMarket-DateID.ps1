@@ -1,5 +1,6 @@
 # File: tools/daily/FullMarket-DateID.ps1
 # Phase-1 dateID ingestion entrypoint
+# DEPRECATED: use scripts/p1_daily_routine.py as the Phase-1 entrypoint.
 # 責任：
 #   - 統一驅動六個 dateID 類 dataset（finstmt/bs/cfs/shareholding/inst_total/gov_bank）
 #   - 管理 RunType（backfill/live）、Mode（single/roundrobin）、日期半開區間 [Start,End)

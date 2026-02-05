@@ -9,6 +9,12 @@ import threading
 import time
 from datetime import datetime
 
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from alpha_core.common.lockfile import FileLock, LockActiveError
+
 try:
     from zoneinfo import ZoneInfo
 except Exception:
@@ -203,7 +209,7 @@ def _log_startup_header(args, symbol_hint):
 
 
 def _repo_root():
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    return _REPO_ROOT
 
 
 def _check_executable_drift():
@@ -364,6 +370,35 @@ def _release_lock(lock_path):
         logging.warning("lock_release_failed lock=%s error=%s", lock_path, exc)
 
 
+def _default_lock_path(symbol):
+    return os.path.join("reports", "phase1", "locks", f"recorder_{symbol}.lock")
+
+
+def _default_stop_token_path(symbol):
+    return os.path.join("reports", "phase1", "signals", f"recorder_{symbol}.stop")
+
+
+def _resolve_lock_path(arg_value, symbol):
+    if arg_value:
+        return str(arg_value).strip()
+    return _default_lock_path(symbol)
+
+
+def _resolve_stop_token_path(arg_value, symbol):
+    if arg_value:
+        return str(arg_value).strip()
+    return _default_stop_token_path(symbol)
+
+
+def _stop_token_exists(path):
+    if not path:
+        return False
+    try:
+        return os.path.exists(path)
+    except Exception:
+        return False
+
+
 def _resolve_keyring_identity(personal_id, cert_path):
     personal_id = (personal_id or "").strip()
     cert_path = (cert_path or "").strip()
@@ -486,7 +521,7 @@ class RotatingJSONLWriter:
 
 
 class TradeRecorder:
-    def __init__(self, sdk, symbol, writer, status_interval):
+    def __init__(self, sdk, symbol, writer, status_interval, stop_token_path=None):
         self._sdk = sdk
         self._symbol = symbol
         self._writer = writer
@@ -499,6 +534,7 @@ class TradeRecorder:
         self._status_interval = max(1, int(status_interval))
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        self._stop_token_path = stop_token_path
 
         self._stock.on("message", self._on_message)
         self._stock.on("connect", self._on_connect)
@@ -564,6 +600,14 @@ class TradeRecorder:
         start_ts = time.monotonic()
         last_status_ts = start_ts - self._status_interval
         while not self._stop.is_set():
+            if _stop_token_exists(self._stop_token_path):
+                logging.info("stop_token_detected path=%s", self._stop_token_path)
+                self._stop.set()
+                try:
+                    self._stock.disconnect()
+                except Exception:
+                    pass
+                break
             now = time.monotonic()
             with self._lock:
                 connected = self._connected
@@ -628,13 +672,21 @@ def _parse_args():
     parser.add_argument("--personal-id", dest="personal_id", help="Fubon personal id.")
     parser.add_argument("--cert-path", dest="cert_path", help="Path to .pfx certificate.")
     parser.add_argument("--symbol", help="Symbol to subscribe.")
-    parser.add_argument("--out-dir", default="datahub/bronze/fubon/trades", help="Output directory.")
+    parser.add_argument(
+        "--out",
+        dest="out_dir",
+        default="datahub/bronze/fubon/trades",
+        help="Output directory.",
+    )
     parser.add_argument("--rotate", choices=["daily", "size"], default="daily", help="Rotate by daily or size.")
     parser.add_argument("--max-mb", type=float, default=256.0, help="Max file size (MB) when rotate=size.")
     parser.add_argument("--mode", choices=["Speed", "Normal"], default="Speed", help="Realtime mode.")
     parser.add_argument("--use-keyring", action="store_true", help="Load secrets from keyring (no prompts).")
     parser.add_argument("--status-interval", type=int, default=30, help="Status log interval (sec).")
     parser.add_argument("--log-dir", default="reports/fubon_recorder", help="Log directory.")
+    parser.add_argument("--lock-path", default=None, help="Recorder lock path.")
+    parser.add_argument("--stop-token-path", default=None, help="Stop token path.")
+    parser.add_argument("--ttl-minutes", type=int, default=180, help="Lock TTL in minutes.")
     parser.add_argument("--only-trading-day", action="store_true", help="Exit 0 when not a trading day.")
     parser.add_argument(
         "--trading-days-csv",
@@ -714,9 +766,24 @@ def main():
     if "." in symbol:
         logging.warning("symbol contains '.', ensure it matches investable_universe.txt")
 
-    lock_path = os.path.join(args.log_dir, f"record_{symbol}.lock")
-    lock_acquired = _acquire_lock(lock_path, symbol)
-    if not lock_acquired:
+    lock_path = _resolve_lock_path(args.lock_path, symbol)
+    stop_token_path = _resolve_stop_token_path(args.stop_token_path, symbol)
+    logging.info("startup lock_path=%s lock_path_abs=%s", lock_path, os.path.abspath(lock_path))
+    logging.info(
+        "startup stop_token_path=%s stop_token_path_abs=%s",
+        stop_token_path,
+        os.path.abspath(stop_token_path),
+    )
+    logging.info("startup ttl_minutes=%s", int(args.ttl_minutes))
+
+    lock = FileLock(lock_path, ttl_minutes=args.ttl_minutes, auto_break_stale=True)
+    lock_acquired = False
+    try:
+        lock.acquire()
+        lock_acquired = True
+        logging.info("lock_acquired symbol=%s lock=%s", symbol, lock_path)
+    except LockActiveError:
+        logging.info("already_running symbol=%s lock=%s", symbol, lock_path)
         raise SystemExit(0)
 
     password, cert_pwd = _load_secrets(personal_id, cert_path, args.use_keyring, args.echo)
@@ -738,7 +805,7 @@ def main():
         sdk.init_realtime(mode)
 
         writer = RotatingJSONLWriter(args.out_dir, symbol, args.rotate, args.max_mb)
-        recorder = TradeRecorder(sdk, symbol, writer, args.status_interval)
+        recorder = TradeRecorder(sdk, symbol, writer, args.status_interval, stop_token_path)
 
         try:
             recorder.run()
@@ -749,7 +816,7 @@ def main():
             writer.close()
     finally:
         if lock_acquired:
-            _release_lock(lock_path)
+            lock.release()
 
 
 if __name__ == "__main__":

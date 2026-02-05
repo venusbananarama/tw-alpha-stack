@@ -11,6 +11,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from alpha_core.common.lockfile import FileLock, LockActiveError  # noqa: E402
 from alpha_core.dates import parse_ymd  # noqa: E402
 from alpha_core.phase4.calendar import is_trading_day, load_trading_days  # noqa: E402
 from alpha_core.phase5 import schemas  # noqa: E402
@@ -27,6 +28,7 @@ from alpha_core.phase5.core import (  # noqa: E402
 from alpha_core.phase5.errors import (  # noqa: E402
     ExitCode,
     InputNotFoundError,
+    LockedError,
     NotTradingDayError,
     OutDirNotEmptyError,
     Phase5Error,
@@ -36,15 +38,16 @@ from alpha_core.phase5.errors import (  # noqa: E402
     SchemaInvalidError,
 )
 from alpha_core.phase5.paths import (  # noqa: E402
-    acquire_lock,
     build_resolved_paths,
     default_run_id,
     known_artifacts,
-    release_lock,
+    PHASE5_LOCK_NAME,
     resolve_out_dir,
     resolve_prices_path,
     resolve_universe_path,
 )
+
+LOCK_TTL_MINUTES = 1440
 
 
 def _log_line(log_path: Optional[Path], message: str) -> None:
@@ -73,8 +76,10 @@ def _parse_windows(raw: str) -> List[int]:
 
 def _prepare_out_dir(out_dir: Path, as_of: str, force: bool) -> None:
     if out_dir.exists():
-        if any(out_dir.iterdir()) and not force:
-            raise OutDirNotEmptyError("out_dir not empty")
+        if not force:
+            items = [p for p in out_dir.iterdir() if p.name != PHASE5_LOCK_NAME]
+            if items:
+                raise OutDirNotEmptyError("out_dir not empty")
         if force:
             for name in known_artifacts(as_of):
                 target = out_dir / name
@@ -138,7 +143,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         "reports_target_path": str(reports_target_path),
         "out_target_path": str(out_target_path),
     }
-    lock_path: Optional[str] = None
+    lock_handle: Optional[FileLock] = None
+    lock_path: Optional[Path] = None
+    lock_acquired = False
 
     try:
         try:
@@ -200,14 +207,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not is_trading_day(as_of, trading_days):
             raise NotTradingDayError("not trading day")
 
-        if args.force:
-            lock_file = out_dir / "p5.lock"
-            if lock_file.exists():
-                try:
-                    lock_file.unlink()
-                except Exception:
-                    pass
-        lock_path = acquire_lock(str(out_dir))
+        lock_path = out_dir / "p5.lock"
+        command = " ".join(str(arg) for arg in sys.argv if arg is not None)
+        lock_handle = FileLock(
+            lock_path,
+            ttl_minutes=LOCK_TTL_MINUTES,
+            auto_break_stale=True,
+            force_break=bool(args.force),
+            command=command,
+        )
+        try:
+            lock_handle.acquire()
+        except LockActiveError as exc:
+            raise LockedError(str(exc)) from exc
+        lock_acquired = True
 
         windows = _parse_windows(str(args.windows))
         specs = build_seed_registry(str(args.profile), as_of, int(args.topn))
@@ -310,8 +323,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             notes=notes,
         )
         write_summary(str(summary_path), summary)
-        if lock_path:
-            release_lock(lock_path)
+        if lock_acquired and lock_handle is not None:
+            lock_handle.release()
     return int(exit_code)
 
 

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import json
+import os
 import pandas as pd
 
 
@@ -29,6 +30,26 @@ import pandas as pd
 def ensure_dir(path: Path) -> None:
     """Create directory if not exists."""
     path.mkdir(parents=True, exist_ok=True)
+
+
+def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding=encoding)
+    os.replace(tmp, path)
+
+
+def atomic_write_json(
+    path: Path,
+    obj: Any,
+    *,
+    encoding: str = "utf-8",
+    ensure_ascii: bool = False,
+    indent: int = 2,
+    sort_keys: bool = False,
+) -> None:
+    payload = json.dumps(obj, ensure_ascii=ensure_ascii, indent=indent, sort_keys=sort_keys)
+    atomic_write_text(path, payload, encoding=encoding)
 
 
 def yyyymm_from_date(d: date) -> str:

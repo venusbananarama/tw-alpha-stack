@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-finmind_dateid_backfill.py
+finmind_dateid_backfill_DEPRECATED
 
 DateID ingestion engine for Phase-1.
 

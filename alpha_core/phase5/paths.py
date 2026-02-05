@@ -7,6 +7,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from .errors import InputNotFoundError, LockedError
 from .schemas import ArtifactNames
 
+PHASE5_LOCK_NAME = "p5.lock"
+
 
 def default_run_id(as_of: str, profile: str) -> str:
     safe_profile = "".join(ch for ch in profile.strip() if ch.isalnum() or ch in ("-", "_"))
@@ -104,7 +106,7 @@ def build_resolved_paths(
 def acquire_lock(out_dir: str) -> str:
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
-    lock_path = out_path / "p5.lock"
+    lock_path = out_path / PHASE5_LOCK_NAME
     try:
         with lock_path.open("x", encoding="utf-8") as f:
             ts = datetime.utcnow().isoformat(timespec="seconds")
@@ -130,5 +132,5 @@ def known_artifacts(as_of: str) -> List[str]:
         ArtifactNames.DECISION_TRACE_JSON,
         ArtifactNames.STRATEGY_ALLOC_CSV,
         ArtifactNames.TARGET_PORTFOLIO_CSV_FMT.format(as_of=as_of),
-        "p5.lock",
+        PHASE5_LOCK_NAME,
     ]

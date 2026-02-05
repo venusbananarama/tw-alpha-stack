@@ -1,4 +1,4 @@
-# scripts/backfill_ingest_ok_from_ledger.py
+# scripts/p1_backfill_ingest_ok_from_ledger.py
 """
 Read boss_import ranges from metrics/ingest_ledger.jsonl and create
 _state/ingest/<dataset>/YYYY-MM-DD.ok files for each dataset.
@@ -10,19 +10,19 @@ records to the ingest ledger.
 Typical usage:
 
     # 從 ledger 自動推回 boss_import 的日期範圍（4 個原始 dataset）
-    python -m scripts.backfill_ingest_ok_from_ledger ^
+    python -m scripts.p1_backfill_ingest_ok_from_ledger ^
       --repo-root C:\\AI\\tw-alpha-stack ^
       --datasets prices chip per dividend ^
       --from-ledger
 
     # DateID 6 表也一起補齊 .ok
-    python -m scripts.backfill_ingest_ok_from_ledger ^
+    python -m scripts.p1_backfill_ingest_ok_from_ledger ^
       --repo-root C:\\AI\\tw-alpha-stack ^
       --datasets finstmt bs cfs shareholding inst_total gov_bank ^
       --from-ledger
 
     # 或是手動指定日期區間（不看 ledger）
-    python -m scripts.backfill_ingest_ok_from_ledger ^
+    python -m scripts.p1_backfill_ingest_ok_from_ledger ^
       --repo-root C:\\AI\\tw-alpha-stack ^
       --datasets prices chip per dividend finstmt bs cfs shareholding inst_total gov_bank ^
       --start-date 1992-01-01 --end-date 2025-11-21

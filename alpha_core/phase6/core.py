@@ -10,6 +10,8 @@ from typing import Dict, Mapping, Optional, Tuple
 
 import pandas as pd
 
+from alpha_core.common.lockfile import FileLock, LockActiveError
+
 from alpha_core.config import ConfigError, load_rules
 from alpha_core.dates import parse_ymd
 from alpha_core.phase4.calendar import is_trading_day, load_trading_days
@@ -33,7 +35,7 @@ from .errors import (
     REASON_OK,
     REASON_SKIP_NON_TRADING_DAY,
 )
-from .paths import LockError, acquire_lock, build_out_dir, compute_run_id, release_lock, resolve_phase6_paths
+from .paths import LockError, build_out_dir, compute_run_id, resolve_phase6_paths
 from .portfolio_construction import build_target_snapshot, scale_targets
 from .risk_budget import compute_risk_budget
 from .risk_metrics import compute_te_ir, load_benchmark_returns, load_price_returns
@@ -56,6 +58,9 @@ class Phase6Result:
     reason_code: str
     out_dir: Path
     summary_path: Path
+
+
+LOCK_TTL_MINUTES = 1440
 
 
 def _now_iso() -> str:
@@ -896,7 +901,9 @@ def run_phase6(
     out_path = Path(build_out_dir(root_dir, as_of, "p6.unknown", out_dir))
     summary_path = out_path / ArtifactNames.P6_SUMMARY_JSON
     log_path: Optional[Path] = None
+    lock_handle: Optional[FileLock] = None
     lock_path: Optional[Path] = None
+    lock_acquired = False
     approved_target_path: Optional[str] = None
     pricing_asof = as_of
     benchmark_path: Optional[Path] = None
@@ -969,7 +976,18 @@ def run_phase6(
 
         out_path.mkdir(parents=True, exist_ok=True)
         lock_path = Path(resolved_paths["lock_path"])
-        acquire_lock(lock_path)
+        command = " ".join(str(arg) for arg in sys.argv if arg is not None)
+        lock_handle = FileLock(
+            lock_path,
+            ttl_minutes=LOCK_TTL_MINUTES,
+            auto_break_stale=True,
+            command=command,
+        )
+        try:
+            lock_handle.acquire()
+        except LockActiveError as exc:
+            raise LockError(str(exc)) from exc
+        lock_acquired = True
 
         calendar_path = Path(resolved_paths["calendar_csv"])
         if not calendar_path.exists():
@@ -1486,8 +1504,8 @@ def run_phase6(
         _log_line(log_path, f"out_dir={out_path}")
         _log_line(log_path, f"final status={status} exit_code={exit_code} reason_code={reason_code}")
         _log_line(log_path, "stage=write_artifacts end")
-        if lock_path is not None:
-            release_lock(lock_path)
+        if lock_acquired and lock_handle is not None:
+            lock_handle.release()
 
     return Phase6Result(
         status=status,

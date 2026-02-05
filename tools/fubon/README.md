@@ -31,7 +31,7 @@ $PY = "C:\AI\tw-alpha-stack\.venv_trade\Scripts\python.exe"
 
 & $PY tools\fubon\login_check.py
 
-& $PY tools\fubon\record_trades_ndjson.py --symbol 2330 --out-dir datahub\bronze\fubon\trades --rotate daily --mode Speed
+& $PY tools\fubon\record_trades_ndjson.py --symbol 2330 --out datahub\bronze\fubon\trades --rotate daily --mode Speed
 
 & $PY tools\fubon\replay_ndjson.py --input tools\fubon\samples\trades.sample.ndjson --out reports\fubon_replay --tz Asia/Taipei --bar 1m
 

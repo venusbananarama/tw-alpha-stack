@@ -9,6 +9,8 @@ from typing import Dict, Iterable, Optional, Set, Tuple
 
 import pandas as pd
 
+from alpha_core.common.lockfile import FileLock, LockActiveError
+
 from .bronze_loader import detect_incomplete_flag, list_bronze_symbols
 from .calendar import is_trading_day, load_trading_days
 from .coverage import compute_symbol_coverage, symbols_payload
@@ -18,6 +20,7 @@ from .errors import (
     GateFailedError,
     IncompleteDayError,
     InputNotFoundError,
+    LockedError,
     Phase4Error,
     REASON_GATE_FAILED,
     REASON_INCOMPLETE_INTRADAY_SKIPPED,
@@ -31,17 +34,17 @@ from .errors import (
 )
 from .exec_loader import resolve_exec_trades_path as _resolve_exec_trades_path
 from .ledger import (
-    acquire_lock,
     append_ledger,
     atomic_write_text,
     ensure_out_dir,
-    release_lock,
     write_ok_flag,
     write_parquet_atomic,
 )
 from .preflight_gate import build_preflight_gate
 from .profile import apply_profile, should_write_ok
 from .reporting import compose_p4_summary, render_drift_dashboard_html, write_summary_atomic
+
+LOCK_TTL_MINUTES = 1440
 
 
 def _repo_root_from_here() -> Path:
@@ -444,7 +447,9 @@ def run(args: argparse.Namespace, *, repo_root: Optional[Path] = None) -> int:
     bronze_root = _resolve_path(args.bronze_root, repo_root)
     exec_trades_path = _resolve_path(args.exec_trades_path, repo_root) if args.exec_trades_path else None
 
-    lock_path = None
+    lock_handle: Optional[FileLock] = None
+    lock_path: Optional[Path] = None
+    lock_acquired = False
     ledger_written = False
     out_dir_ready = False
     status = "PASS"
@@ -658,7 +663,19 @@ def run(args: argparse.Namespace, *, repo_root: Optional[Path] = None) -> int:
             status = "WARN"
 
         lock_dir = repo_root / "reports" / "p4" / "_locks"
-        lock_path = acquire_lock(lock_dir, run_id)
+        lock_path = lock_dir / f"{run_id}.lock"
+        command = " ".join(str(arg) for arg in sys.argv if arg is not None)
+        lock_handle = FileLock(
+            lock_path,
+            ttl_minutes=LOCK_TTL_MINUTES,
+            auto_break_stale=True,
+            command=command,
+        )
+        try:
+            lock_handle.acquire()
+        except LockActiveError as exc:
+            raise LockedError(str(exc)) from exc
+        lock_acquired = True
         ensure_out_dir(out_dir, force=args.force)
         out_dir_ready = True
         _log_line(log_path, "run_start")
@@ -992,4 +1009,5 @@ def run(args: argparse.Namespace, *, repo_root: Optional[Path] = None) -> int:
             ledger_written = True
         return int(ExitCode.SCHEMA_VALIDATION_FAILED)
     finally:
-        release_lock(lock_path)
+        if lock_acquired and lock_handle is not None:
+            lock_handle.release()

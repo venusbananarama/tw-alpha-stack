@@ -41,4 +41,3 @@ def print_gate_result(res: Dict[str, Any]) -> None:
 
 
 
-

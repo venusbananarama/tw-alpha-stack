@@ -44,7 +44,7 @@ Notes:
 - 建議第一次使用時加上 --dry-run 看 log，再移除 --dry-run 正式執行。
 - 非 dry-run 且未指定 --no-ledger 時，會將每個 dataset 的匯入日期範圍
   以 run_type="boss_import" 追加到 metrics\\ingest_ledger.jsonl，之後
-  由 backfill_ingest_ok_from_ledger.py 產生 _state\\ingest\\<dataset>\\YYYY-MM-DD.ok。
+  由 p1_backfill_ingest_ok_from_ledger.py 產生 _state\\ingest\\<dataset>\\YYYY-MM-DD.ok。
 """
 
 from __future__ import annotations
@@ -205,7 +205,7 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "If set, do NOT append boss_import entries to metrics/ingest_ledger.jsonl. "
-            "預設會寫 ledger，方便 backfill_ingest_ok_from_ledger.py 產生 .ok。"
+            "預設會寫 ledger，方便 p1_backfill_ingest_ok_from_ledger.py 產生 .ok。"
         ),
     )
     parser.add_argument(

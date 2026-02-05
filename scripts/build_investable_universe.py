@@ -225,11 +225,11 @@ def load_prices(prices_root: Path) -> pd.DataFrame:
     if not prices_root.is_dir():
         raise FileNotFoundError(f"prices root not found: {prices_root}")
 
-    files = sorted(prices_root.rglob("*.parquet"))
+    files = sorted(prices_root.glob("yyyymm=*/data.parquet"))
     if not files:
         raise FileNotFoundError(f"No parquet files under {prices_root}")
 
-    log(f"Found {len(files)} parquet files under {prices_root}")
+    log(f"Found {len(files)} data.parquet files under {prices_root}")
 
     dfs: List[pd.DataFrame] = []
     for i, f in enumerate(files, start=1):

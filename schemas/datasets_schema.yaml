@@ -42,9 +42,21 @@ column_types:
 # 掃描範圍（相對於 --datahub-root）
 paths:
   - name: prices
-    glob: "silver/alpha/prices/**/*.parquet"
+    glob: "silver/alpha/prices/yyyymm=*/data.parquet"
   - name: chip
-    glob: "silver/alpha/chip/**/*.parquet"
+    glob: "silver/alpha/chip/yyyymm=*/data.parquet"
+  - name: per
+    glob: "silver/alpha/per/yyyymm=*/data.parquet"
+  - name: dividend
+    glob: "silver/alpha/dividend/yyyymm=*/data.parquet"
+  - name: shareholding
+    glob: "silver/alpha/shareholding/yyyymm=*/shareholding_*.parquet"
+  - name: inst_total
+    glob: "silver/alpha/inst_total/yyyymm=*/inst_total_*.parquet"
+  - name: gov_bank
+    glob: "silver/alpha/gov_bank/yyyymm=*/gov_bank_*.parquet"
+  - name: prices_daily
+    glob: "silver/alpha/prices_daily.parquet"
   # 需要時可自行擴充其它資料集
 
 dividend:

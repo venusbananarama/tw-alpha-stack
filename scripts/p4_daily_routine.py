@@ -13,6 +13,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from alpha_core.common.lockfile import FileLock, LockActiveError  # noqa: E402
 from alpha_core.phase4.bronze_loader import detect_incomplete_flag, list_bronze_symbols  # noqa: E402
 from alpha_core.phase4.calendar import is_trading_day, load_trading_days  # noqa: E402
 from alpha_core.phase4.coverage import compute_symbol_coverage, symbols_payload  # noqa: E402
@@ -22,6 +23,7 @@ from alpha_core.phase4.errors import (  # noqa: E402
     GateFailedError,
     IncompleteDayError,
     InputNotFoundError,
+    LockedError,
     Phase4Error,
     REASON_GATE_FAILED,
     REASON_INCOMPLETE_INTRADAY_SKIPPED,
@@ -35,17 +37,17 @@ from alpha_core.phase4.errors import (  # noqa: E402
 )
 from alpha_core.phase4.exec_loader import resolve_exec_trades_path  # noqa: E402
 from alpha_core.phase4.ledger import (  # noqa: E402
-    acquire_lock,
     append_ledger,
     atomic_write_text,
     ensure_out_dir,
-    release_lock,
     write_ok_flag,
     write_parquet_atomic,
 )
 from alpha_core.phase4.reporting import compose_p4_summary, render_drift_dashboard_html, write_summary_atomic  # noqa: E402
 from scripts.exec_replay import run_exec_replay  # noqa: E402
 from scripts.wf_runner import _run_p4 as wf_run_p4  # noqa: E402
+
+LOCK_TTL_MINUTES = 1440
 
 
 def _resolve_path(path: str) -> Path:
@@ -392,7 +394,9 @@ def main() -> int:
     bronze_root = _resolve_path(args.bronze_root)
     exec_trades_path = _resolve_path(args.exec_trades_path) if args.exec_trades_path else None
 
-    lock_path = None
+    lock_handle: Optional[FileLock] = None
+    lock_path: Optional[Path] = None
+    lock_acquired = False
     ledger_written = False
     out_dir_ready = False
     status = "PASS"
@@ -588,7 +592,19 @@ def main() -> int:
             status = "WARN"
 
         lock_dir = _REPO_ROOT / "reports" / "p4" / "_locks"
-        lock_path = acquire_lock(lock_dir, run_id)
+        lock_path = lock_dir / f"{run_id}.lock"
+        command = " ".join(str(arg) for arg in sys.argv if arg is not None)
+        lock_handle = FileLock(
+            lock_path,
+            ttl_minutes=LOCK_TTL_MINUTES,
+            auto_break_stale=True,
+            command=command,
+        )
+        try:
+            lock_handle.acquire()
+        except LockActiveError as exc:
+            raise LockedError(str(exc)) from exc
+        lock_acquired = True
         ensure_out_dir(out_dir, force=args.force)
         out_dir_ready = True
         _log_line(log_path, "run_start")
@@ -862,7 +878,8 @@ def main() -> int:
             ledger_written = True
         return int(ExitCode.SCHEMA_VALIDATION_FAILED)
     finally:
-        release_lock(lock_path)
+        if lock_acquired and lock_handle is not None:
+            lock_handle.release()
 
 
 def _cli_main() -> int:
