@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-alpha_core.factor_impl.liq_impl
+alpha_core.phase2.factor_impl.liq_impl
 
 Liquidity family (liq_turnover_20d, etc.)
 Optimized by Gemini (Vectorized Implementation)
@@ -12,7 +12,7 @@ from typing import Any, Optional
 import numpy as np
 import pandas as pd
 
-from alpha_core.factor_xform import apply_xsection_xform, winsorize_xsection
+from alpha_core.phase2.corelib.factor_xform import apply_xsection_xform, winsorize_xsection
 
 
 _INVALID_VALUE_MARGIN = 1.0

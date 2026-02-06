@@ -97,7 +97,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         sys.path.insert(0, str(root))
 
     try:
-        from alpha_core.capacity_lib import (  # type: ignore
+        from alpha_core.phase2.corelib.capacity_lib import (  # type: ignore
             build_inputs_from_combo,
             capacity_summary_to_json,
             evaluate_capacity,
@@ -105,7 +105,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             load_combo_plan,
         )
     except Exception as exc:  # pragma: no cover - defensive
-        LOG.error("Failed to import alpha_core.capacity_lib: %s", exc)
+        LOG.error("Failed to import alpha_core.phase2.corelib.capacity_lib: %s", exc)
         return 1
 
     as_of: str = str(args.as_of)
@@ -182,3 +182,5 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
+
+

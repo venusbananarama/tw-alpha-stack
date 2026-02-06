@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, List, Mapping, Optional
 
 # ---------------------------------------------------------------------------
-# bootstrap：優先使用 alpha_core.factor_slo_lib，沒有才退回舊版 factor_slo_lib
+# bootstrap：優先使用 alpha_core.phase2.corelib.factor_slo_lib，沒有才退回舊版 factor_slo_lib
 # ---------------------------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,7 +29,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 try:
-    from alpha_core.factor_slo_lib import (  # type: ignore
+    from alpha_core.phase2.corelib.factor_slo_lib import (  # type: ignore
         FactorSloResult,
         load_factor_slo_config,
         evaluate_factor_slo,
@@ -317,3 +317,5 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+

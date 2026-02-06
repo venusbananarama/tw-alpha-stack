@@ -12,8 +12,8 @@ import pandas as pd
 
 from alpha_core.common.lockfile import FileLock, LockActiveError
 
-from alpha_core.config import ConfigError, load_rules
-from alpha_core.dates import parse_ymd
+from alpha_core.phase2.corelib.config import ConfigError, load_rules
+from alpha_core.phase2.corelib.dates import parse_ymd
 from alpha_core.phase4.calendar import is_trading_day, load_trading_days
 
 from .errors import (

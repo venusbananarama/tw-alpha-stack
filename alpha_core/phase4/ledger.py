@@ -10,7 +10,7 @@ from typing import Any, Dict
 
 import pandas as pd
 
-from alpha_core.io import append_jsonlines, ensure_dir
+from alpha_core.phase2.corelib.io import append_jsonlines, ensure_dir
 
 from .errors import LockedError, OutDirNotEmptyError
 

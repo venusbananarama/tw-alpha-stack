@@ -4,9 +4,9 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from alpha_core import factor_eval_lib
-from alpha_core.factor_engine import FactorEngineConfig, run_factor_engine
-from alpha_core.factor_eval import evaluate_factors as _evaluate_factors
+from alpha_core.phase2.corelib import factor_eval_lib
+from alpha_core.phase2.corelib.factor_engine import FactorEngineConfig, run_factor_engine
+from alpha_core.phase2.corelib.factor_eval import evaluate_factors as _evaluate_factors
 
 from . import compose as compose_mod
 from . import evidence as evidence_mod
@@ -363,7 +363,7 @@ def run_phase2(cfg: Phase2RunConfig) -> Phase2RunResult:
         engine_cfg = FactorEngineConfig(
             root=root,
             rules_path=cfg.rules_path,
-            impl_module="alpha_core.factor_impl",
+            impl_module="alpha_core.phase2.factor_impl",
             factor_root=paths.factor_root(root),
             ledger_path=root / "metrics" / "factor_ledger.jsonl",
             summary_path=root / "reports" / "factor_engine_summary.json",

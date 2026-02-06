@@ -10,6 +10,19 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def resolve_gate_policy(
+    profile: str,
+    gate_policy_arg: Optional[str],
+) -> Literal["require_pass", "allow_fail"]:
+    val = (gate_policy_arg or "").strip().lower()
+    if val in ("require_pass", "allow_fail"):
+        return val
+    p = (profile or "").strip().lower()
+    if p in ("live", "prod", "production"):
+        return "require_pass"
+    return "allow_fail"
+
+
 class Phase2Error(RuntimeError):
     """Base error for Phase-2 core."""
 

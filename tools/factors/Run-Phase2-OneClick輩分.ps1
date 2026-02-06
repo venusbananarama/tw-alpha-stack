@@ -535,7 +535,7 @@ try {
     # -----------------------------------------------------------------------------
 
     $statusArgs = @(
-        ".\scripts\factor_status.py",
+        ".\scripts\p2\factor_status.py",
         "--root", $rootPath,
         "--expect-date", $Date,
         "--window-months", "24",           # 以 24 個月視窗為 baseline
@@ -770,7 +770,7 @@ try {
         $factorList = [string]::Join(',', $batch)
 
         $engineArgs = @(
-            ".\scripts\factor_engine.py",
+            ".\scripts\p2\factor_engine.py",
             "--root", $rootPath,
             "--impl-module", $ImplModule,
             "--rules", $rulesPath,
@@ -818,7 +818,7 @@ try {
     }
 
     $evalArgs = @(
-        ".\scripts\factor_eval.py",
+        ".\scripts\p2\factor_eval.py",
         "--root", $rootPath,
         "--rules-file", $rulesPath,
         "--date", $Date,
@@ -912,3 +912,4 @@ finally {
     # 還原原本工作目錄，避免影響呼叫者
     Set-Location $prevLocation
 }
+

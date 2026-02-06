@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-from alpha_core.config import FactorDefinition, GateRule
-from alpha_core import factor_eval_lib
-from alpha_core.io import atomic_write_json
+from alpha_core.phase2.corelib.config import FactorDefinition, GateRule
+from alpha_core.phase2.corelib import factor_eval_lib
+from alpha_core.phase2.corelib.io import atomic_write_json
 
 from .contracts import now_iso
 from . import paths

@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from alpha_core.io import atomic_write_json  # noqa: E402
+from alpha_core.phase2.corelib.io import atomic_write_json  # noqa: E402
 from alpha_core.phase1 import paths as p1_paths  # noqa: E402
 
 
@@ -345,3 +345,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+

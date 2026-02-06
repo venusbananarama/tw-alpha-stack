@@ -28,7 +28,7 @@ from typing import Any, List, Optional
 
 import numpy as np
 import pandas as pd
-from alpha_core.factor_xform import apply_xsection_xform
+from alpha_core.phase2.corelib.factor_xform import apply_xsection_xform
 
 # _get_shares_column 目前僅存在於 size_impl，但此模組在部分環境可能缺少該 helper。
 # 以 try-import + fallback 方式確保 value_cfy 不因缺函式而無法載入。

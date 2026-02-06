@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import Any, List, Mapping, Optional
 
-from alpha_core.factor_slo_lib import (  # ★ 這行改成 alpha_core 版本
+from alpha_core.phase2.corelib.factor_slo_lib import (  # ★ 這行改成 alpha_core 版本
     FactorSloResult,
     load_factor_slo_config,
     evaluate_factor_slo,
@@ -305,3 +305,5 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+

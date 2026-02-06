@@ -12,7 +12,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from alpha_core.common.lockfile import FileLock, LockActiveError  # noqa: E402
-from alpha_core.dates import parse_ymd  # noqa: E402
+from alpha_core.phase2.corelib.dates import parse_ymd  # noqa: E402
 from alpha_core.phase4.calendar import is_trading_day, load_trading_days  # noqa: E402
 from alpha_core.phase5 import schemas  # noqa: E402
 from alpha_core.phase5.core import (  # noqa: E402
@@ -359,3 +359,5 @@ def _build_summary(
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+

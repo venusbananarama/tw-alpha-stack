@@ -14,7 +14,7 @@ param(
 $ErrorActionPreference='Stop'
 
 $python   = ".\.venv\Scripts\python.exe"
-$py_corr  = ".\scripts\factor_corr.py"
+$py_corr  = ".\scripts\p2\factor_corr.py"
 if(!(Test-Path $python)) { throw "Python venv not found: $python" }
 if(!(Test-Path $py_corr)) { throw "Missing script: $py_corr" }
 
@@ -26,3 +26,4 @@ $cmd = @(
   "--output", $Output
 )
 & $python @cmd
+

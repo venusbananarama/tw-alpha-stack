@@ -4,7 +4,7 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
-from alpha_core import dates as date_lib
+from alpha_core.phase2.corelib import dates as date_lib
 
 
 def repo_root() -> Path:
@@ -82,3 +82,9 @@ def default_as_of_date(today: Optional[date] = None) -> date:
 
 def format_as_of(as_of: date) -> str:
     return as_of.isoformat()
+
+
+def build_run_id(as_of: str, engine: str, profile: str, preset: str, user_run_id: Optional[str]) -> str:
+    if user_run_id:
+        return user_run_id
+    return f"p2.{as_of}.{engine}.{profile}.{preset}"

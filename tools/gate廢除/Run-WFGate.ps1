@@ -616,7 +616,7 @@ function Compose-WFSummaryFromCsv([string]$Reports = ".\reports") {
   }
 }
 
-# ---------- 因子 gate-ready SLO：呼叫 scripts\factor_slo_check.py ----------
+# ---------- 因子 gate-ready SLO：呼叫 scripts\p2\factor_slo_check.py ----------
 
 function Invoke-FactorGateReadySLO {
   param(
@@ -627,7 +627,7 @@ function Invoke-FactorGateReadySLO {
 
   $rulesPath = Join-Path $Root "rules_factors.yaml"
   $wfPath    = Join-Path $Root "reports\wf_summary.json"
-  $cli       = Join-Path $Root "scripts\factor_slo_check.py"
+  $cli       = Join-Path $Root "scripts\p2\factor_slo_check.py"
 
   # 檔案不齊 → 視為「本輪 Gate 不啟用因子 SLO」
   if (-not (Test-Path $rulesPath)) {
@@ -656,7 +656,7 @@ function Invoke-FactorGateReadySLO {
   }
   if (-not (Test-Path $cli)) {
     if (-not $Quiet) {
-      Write-Host "[FactorSLO] scripts\factor_slo_check.py 不存在，略過因子 gate-ready SLO 檢查" -ForegroundColor DarkYellow
+      Write-Host "[FactorSLO] scripts\p2\factor_slo_check.py 不存在，略過因子 gate-ready SLO 檢查" -ForegroundColor DarkYellow
     }
     return @{
       enabled       = $false
@@ -1131,3 +1131,4 @@ if ($gate_state -eq "PASS") {
 else {
   exit 1
 }
+

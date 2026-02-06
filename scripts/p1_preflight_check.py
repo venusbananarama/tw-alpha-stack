@@ -31,7 +31,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from alpha_core.config import ConfigError, load_rules  # noqa: E402
+from alpha_core.phase2.corelib.config import ConfigError, load_rules  # noqa: E402
 
 DATE_TZ_NAME = "Asia/Taipei"
 DEFAULT_CUTOFF_HOUR = int(os.getenv("ALPHACITY_DATA_READY_HOUR_LOCAL", "18"))
@@ -994,3 +994,5 @@ if __name__ == "__main__":
     except Exception:
         pass
     raise SystemExit(main())
+
+

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-alpha_core.factor_impl.ai_impl_stub
+alpha_core.phase2.factor_impl.ai_impl_stub
 AI / ML Factor Engine Skeleton
 """
 from __future__ import annotations

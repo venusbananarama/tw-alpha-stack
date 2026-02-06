@@ -4,8 +4,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-from alpha_core import factor_slo_lib
-from alpha_core.io import atomic_write_json
+from alpha_core.phase2.corelib import factor_slo_lib
+from alpha_core.phase2.corelib.io import atomic_write_json
 
 from .contracts import now_iso
 from .gate import GateEvaluation

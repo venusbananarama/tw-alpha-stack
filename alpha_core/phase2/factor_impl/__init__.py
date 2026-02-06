@@ -1,7 +1,7 @@
-# alpha_core/factor_impl/__init__.py
+# alpha_core/phase2/factor_impl/__init__.py
 # -*- coding: utf-8 -*-
 """
-alpha_core.factor_impl
+alpha_core.phase2.factor_impl
 
 Dispatch layer for Phase-2 factor implementations.
 Step 1-5: Real Implementation with Robust Routing & IO.
@@ -20,7 +20,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 # Fix: 補上 relativedelta，解決 NameError
 from dateutil.relativedelta import relativedelta
 
-from alpha_core import io as factor_io
+from alpha_core.phase2.corelib import io as factor_io
 
 # 相對匯入各因子實作模組
 # 使用 try-import 以容許部分實作尚未就緒
@@ -170,7 +170,7 @@ def run_factor_task(
     run_id: str = "default_run",
 ) -> Dict[str, Any]:
     """
-    單一因子任務入口，由 alpha_core.factor_engine 呼叫。
+    單一因子任務入口，由 alpha_core.phase2.corelib.factor_engine 呼叫。
 
     Parameters
     ----------

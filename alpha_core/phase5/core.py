@@ -9,8 +9,8 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
-from alpha_core.dates import parse_ymd
-from alpha_core.io import load_silver_data
+from alpha_core.phase2.corelib.dates import parse_ymd
+from alpha_core.phase2.corelib.io import load_silver_data
 
 from .errors import InfeasibleError, InputNotFoundError, InsufficientDataError, SchemaInvalidError
 from .schemas import ArtifactNames, TARGET_PORTFOLIO_COLUMNS

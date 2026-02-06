@@ -2,7 +2,7 @@
 
 ## A Section (Purpose / Symptoms / Dependencies / Direction / Output)
 - Purpose: fix microstructure_v1 liq_turnover_20d so run_liquidity_factor loads, factor_engine is not skipped, and outputs the canonical schema for eval/compose.
-- Symptoms: run_liquidity_factor is None due to liq_impl import error (cannot import winsorize_by_quantile from alpha_core.factor_xform), leading to not implemented / skipped.
+- Symptoms: run_liquidity_factor is None due to liq_impl import error (cannot import winsorize_by_quantile from alpha_core.phase2.corelib.factor_xform), leading to not implemented / skipped.
 - Data dependencies: rules specify inputs = ["prices", "shareholding"]; turnover uses prices columns (turnover_rate or turnover value) with proxy fallback.
 - Direction: direction=illiquid with transform=log1p; lower turnover implies higher score after cross-sectional transforms.
 - Output schema: date (datetime64), stock_id (str), factor_value (float).
@@ -19,20 +19,20 @@
 Set-Location C:\AI\tw-alpha-stack
 $asOf = "2025-11-28"
 
-python .\scripts\factor_engine.py `
+python .\scripts\p2\factor_engine.py `
   --root . `
   --rules .\rules_factors.yaml `
   --factors liq_turnover_20d `
   --windows 6,12,24 `
   --end $asOf
 
-python .\scripts\factor_eval.py `
+python .\scripts\p2\factor_eval.py `
   --root . `
   --factors liq_turnover_20d `
   --windows 6,12,24 `
   --as-of $asOf
 
-python .\scripts\factor_diag.py eval `
+python .\scripts\p2\factor_diag.py eval `
   --root . `
   --rules .\rules_factors.yaml `
   --factor-id liq_turnover_20d `
@@ -72,3 +72,4 @@ for t in targets:
 print("\nALL_TARGETS_PASSED =", ok)
 '@ | python -
 ```
+

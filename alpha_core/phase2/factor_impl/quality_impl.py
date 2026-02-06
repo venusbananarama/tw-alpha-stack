@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-alpha_core.factor_impl.quality_impl
+alpha_core.phase2.factor_impl.quality_impl
 
 Quality factor based on ROE / ROEQ.
 Optimized by Gemini (Vectorized Implementation)

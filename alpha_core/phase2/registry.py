@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict
 
-from alpha_core.config import ConfigError, FactorDefinition, load_factor_definitions as _load_defs
+from alpha_core.phase2.corelib.config import ConfigError, FactorDefinition, load_factor_definitions as _load_defs
 
 from .contracts import RulesSchemaError
 

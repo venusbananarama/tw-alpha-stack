@@ -173,7 +173,7 @@ function New-FactorPlan {
         New-Item -ItemType Directory -Path $reportsDir | Out-Null
     }
 
-    $planScript = Join-Path $Root 'scripts\factor_plan_lib.py'
+    $planScript = Join-Path $Root 'scripts\p2\factor_plan_lib.py'
     if (-not (Test-Path -LiteralPath $planScript)) {
         throw "factor_plan_lib.py not found at $planScript"
     }
@@ -249,7 +249,7 @@ function New-FactorPlan {
 }
 
 # ---------------------------------------------------------------------------
-# Utility: corr phase（呼叫 scripts\factor_corr.py）
+# Utility: corr phase（呼叫 scripts\p2\factor_corr.py）
 # ---------------------------------------------------------------------------
 function Invoke-FactorCorr {
     param(
@@ -275,7 +275,7 @@ function Invoke-FactorCorr {
         return
     }
 
-    $corrScript = Join-Path $RootPath 'scripts\factor_corr.py'
+    $corrScript = Join-Path $RootPath 'scripts\p2\factor_corr.py'
     if (-not (Test-Path -LiteralPath $corrScript)) {
         Write-Phase2Warn "factor_corr.py not found at $corrScript; corr phase skipped."
         return
@@ -327,7 +327,7 @@ if (-not (Test-Path -LiteralPath $reportsDir)) {
 # ---------------------------------------------------------------------------
 # 呼叫 factor_status.py 產生狀態 JSON（提供給 factor_plan_lib）
 # ---------------------------------------------------------------------------
-$statusScript   = Join-Path $Root 'scripts\factor_status.py'
+$statusScript   = Join-Path $Root 'scripts\p2\factor_status.py'
 $statusJsonPath = Join-Path $reportsDir ("factor_status.{0}.json" -f $Date)
 
 $null = Invoke-PythonTool -PythonExePath $PythonExe `
@@ -430,7 +430,7 @@ function Invoke-FactorEngineBatches {
         return
     }
 
-    $engineScript = Join-Path $RootPath 'scripts\factor_engine.py'
+    $engineScript = Join-Path $RootPath 'scripts\p2\factor_engine.py'
 
     # 只處理 decided_action = compute+eval 的因子
     $active = $PlanItems | Where-Object { $_.decided_action -eq 'compute+eval' }
@@ -481,7 +481,7 @@ function Invoke-FactorEval {
         [object[]]$PlanItems
     )
 
-    $evalScript = Join-Path $RootPath 'scripts\factor_eval.py'
+    $evalScript = Join-Path $RootPath 'scripts\p2\factor_eval.py'
 
     if (-not (Test-Path -LiteralPath $evalScript)) {
         Write-Phase2Warn "factor_eval.py not found at $evalScript; eval phase skipped."
@@ -762,3 +762,4 @@ if ($AutoGate.IsPresent -and $ComposeToWF.IsPresent -and $effectiveMode -eq 'com
 
 Write-Phase2Info "Run-Phase2-OneClick (A+B segments) completed successfully."
 exit 0
+

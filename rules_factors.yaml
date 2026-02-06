@@ -7,7 +7,7 @@
 # - gate-ready SLO：定義最少因子數、每個 window 需要幾個因子、關鍵必備因子
 #
 # 消費者：
-# - scripts/factor_registry.py         → 只看 top-level "factors"
+# - scripts/p2/factor_registry.py         → 只看 top-level "factors"
 # - tools/factors/Run-Phase2-OneClick.ps1
 #     → 主要使用 gate_ready.profiles.<profile>.* 的門檻，
 #       factor_slo_lib 會讀取 gate_ready.* 產生 wf_summary.factor_slo
@@ -31,10 +31,10 @@ metadata:
 # ---------------------------------------------------------------------------
 # Corr / max_corr 契約說明
 #
-# - corr 計算由 alpha_core.corr_lib 完成：
+# - corr 計算由 alpha_core.phase2.corelib.corr_lib 完成：
 #     * compute_corr_matrix 產生相關矩陣
 #     * summarize_corr 產生 max_abs_per_factor[factor_id]（最大 |corr|）
-# - scripts/factor_corr.py 為唯一執行入口，輸出：
+# - scripts/p2/factor_corr.py 為唯一執行入口，輸出：
 #     * reports/factor_corr/corr_matrix_<as_of>_<window>.parquet
 #     * reports/factor_corr/corr_pairs_<as_of>_<window>.parquet
 #     * reports/factor_corr/corr_summary_<as_of>_<window>.json
@@ -387,7 +387,7 @@ factors:
       Rolling beta computed from daily log-returns:
       per stock x = ret_stock, market y = equal-weighted ret_mkt over investable universe.
       Uses trading_days calendar, rolling window_days (default 252) on Cov(x,y)/Var(y)
-      implemented in alpha_core.factor_impl (ta_beta_v1). Dev/test 可先用來觀察 beta 分佈，
+      implemented in alpha_core.phase2.factor_impl (ta_beta_v1). Dev/test 可先用來觀察 beta 分佈，
       live profile 仍需經過 factor_eval / Gate 驗證品質後再納入正式 multi-factor 池。
     params:
       window_days: 252
@@ -409,7 +409,7 @@ factors:
     data_freq: monthly
     engine: fundamental_value_v1
     impl_notes: >
-      Uses PER silver table; alpha_core.factor_impl normalizes PE columns and computes earnings yield (1/PE).
+      Uses PER silver table; alpha_core.phase2.factor_impl normalizes PE columns and computes earnings yield (1/PE).
       Currently outputs daily-dated factor values; sector-neutralization is applied downstream in evaluation/combo.
     params:
       direction: invert
@@ -448,7 +448,7 @@ factors:
     data_freq: monthly
     engine: fundamental_quality_v1
     impl_notes: >
-      Uses silver finstmt tables; alpha_core.factor_impl auto-detects net_income / equity-like columns
+      Uses silver finstmt tables; alpha_core.phase2.factor_impl auto-detects net_income / equity-like columns
       and computes ROE = NI / Equity on reporting dates (coarse TTM/period-level).
       Daily alignment / sector-neutralization are handled downstream in evaluation/combo.
       若 finstmt schema 未完全對齊，開發階段可能回傳空結果（dev-safe）。
@@ -623,7 +623,7 @@ factors:
     engine: ai_xgb_v1
     impl_notes: >
       Consumes classic factors as features; training and model versioning
-      governed by separate config. alpha_core.factor_impl currently keeps
+      governed by separate config. alpha_core.phase2.factor_impl currently keeps
       ai_xgb_v1 as a skeleton (returns empty) until Phase-2 later stage.
     wf_windows: [12, 24]
     gate_rules:
@@ -633,3 +633,4 @@ factors:
       # max_corr: 0.85       # TODO: enable when corr_summary is wired into gating
       psr_min: 1.00
     enabled: false  # 預留，之後 Phase-2 後半段（AI 引擎）再開啟
+

@@ -15,7 +15,7 @@ $ErrorActionPreference='Stop'
 
 # Directly call python eval (no wrappers).
 $python   = ".\.venv\Scripts\python.exe"
-$py_eval  = ".\scripts\factor_eval.py"
+$py_eval  = ".\scripts\p2\factor_eval.py"
 if(!(Test-Path $python)) { throw "Python venv not found: $python" }
 if(!(Test-Path $py_eval)) { throw "Missing script: $py_eval" }
 
@@ -34,3 +34,4 @@ $cmd = @(
   "--output", $Output
 )
 & $python @cmd
+

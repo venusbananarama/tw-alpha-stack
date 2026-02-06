@@ -17,7 +17,7 @@ Compose factor_eval summaries into wf_summary.json.factors / factor_candidates�
           min_rank_ic: 0.03
 - 通過門檻 → wf_summary["factors"][factor_id]
   未通過或無門檻 → wf_summary["factor_candidates"][factor_id]（或依 mode 決定是否寫入）。
-- 完成 factors 組裝後，透過 alpha_core.factor_slo_lib：
+- 完成 factors 組裝後，透過 alpha_core.phase2.corelib.factor_slo_lib：
   - 讀 rules_factors.yaml.gate_ready（含 engine/profile override）
   - 對 wf_summary["factors"] 做 SLO 評估
   - 結果寫入 wf_summary["factor_slo"]
@@ -37,14 +37,14 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # SLO library（純函式，負責 gate_ready → SLO 結果）
-#   1) 首選 alpha_core.factor_slo_lib（當專案以 package 執行時）
+#   1) 首選 alpha_core.phase2.corelib.factor_slo_lib（當專案以 package 執行時）
 #   2) 若找不到 alpha_core，將 repo root 加入 sys.path 後再嘗試一次
 #   3) 若仍失敗，退回為「無 SLO 功能」（load_factor_slo_config / evaluate_factor_slo = None）
 # ---------------------------------------------------------------------------
 
 try:
     # Case 1: 例如 python -m scripts.compose_factors_to_wf，root 已在 sys.path
-    from alpha_core.factor_slo_lib import (  # type: ignore[import]
+    from alpha_core.phase2.corelib.factor_slo_lib import (  # type: ignore[import]
         load_factor_slo_config,
         evaluate_factor_slo,
     )
@@ -54,12 +54,12 @@ except Exception:  # pragma: no cover
         _ROOT = Path(__file__).resolve().parents[1]
         if str(_ROOT) not in sys.path:
             sys.path.insert(0, str(_ROOT))
-        from alpha_core.factor_slo_lib import (  # type: ignore[import]
+        from alpha_core.phase2.corelib.factor_slo_lib import (  # type: ignore[import]
             load_factor_slo_config,
             evaluate_factor_slo,
         )
     except Exception:  # pragma: no cover
-        # 在 unit test 或特殊環境下可能沒有 alpha_core.factor_slo_lib
+        # 在 unit test 或特殊環境下可能沒有 alpha_core.phase2.corelib.factor_slo_lib
         load_factor_slo_config = None  # type: ignore[assignment]
         evaluate_factor_slo = None  # type: ignore[assignment]
 
@@ -858,3 +858,5 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+

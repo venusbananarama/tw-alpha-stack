@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-alpha_core.factor_impl.mom_impl
+alpha_core.phase2.factor_impl.mom_impl
 
 Momentum family (mom_6m, mom_12m, mom_short_resid).
 Optimized by Gemini (Vectorized Implementation)
@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from alpha_core.factor_xform import apply_xsection_xform
+from alpha_core.phase2.corelib.factor_xform import apply_xsection_xform
 
 
 def _get_price_column(df: pd.DataFrame) -> str:

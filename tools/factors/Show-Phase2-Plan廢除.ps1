@@ -142,7 +142,7 @@ try {
     # -----------------------------------------------------------------------------
 
     $statusArgs = @(
-        ".\scripts\factor_status.py",
+        ".\scripts\p2\factor_status.py",
         "--root", $rootPath,
         "--expect-date", $Date,
         "--window-months", "24",           # 以 24 個月視窗為 baseline
@@ -275,3 +275,4 @@ finally {
     # 還原原本工作目錄，避免影響呼叫者
     Set-Location $prevLocation
 }
+

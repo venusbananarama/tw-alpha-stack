@@ -7,7 +7,7 @@ Phase-2 Step3：因子組合 CLI 入口。
 
 用途：
 - 讀取 reports/factor_eval 下所有 *_summary.json
-- 根據 alpha_core.combo_lib 的邏輯計算各視窗的 score 表
+- 根據 alpha_core.phase2.corelib.combo_lib 的邏輯計算各視窗的 score 表
 - 依照去相關條件（可選）挑選每個視窗的因子組合
 - 輸出 reports/factor_combo.<as_of>.json
 
@@ -38,7 +38,7 @@ _REPO_ROOT = _THIS_FILE.parents[1]  # C:\AI\tw-alpha-stack
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from alpha_core.combo_lib import build_combo_plan, save_combo_plan  # noqa: E402
+from alpha_core.phase2.corelib.combo_lib import build_combo_plan, save_combo_plan  # noqa: E402
 
 
 def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
@@ -143,3 +143,5 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
 if __name__ == "__main__":
     main()
+
+

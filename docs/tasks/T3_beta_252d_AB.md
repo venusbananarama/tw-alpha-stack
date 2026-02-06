@@ -18,20 +18,20 @@
 Set-Location C:\AI\tw-alpha-stack
 $asOf = "2025-11-28"
 
-python .\scripts\factor_engine.py `
+python .\scripts\p2\factor_engine.py `
   --root . `
   --rules .\rules_factors.yaml `
   --factors beta_252d `
   --windows 6,12,24 `
   --end $asOf
 
-python .\scripts\factor_eval.py `
+python .\scripts\p2\factor_eval.py `
   --root . `
   --factors beta_252d `
   --windows 6,12,24 `
   --as-of $asOf
 
-python .\scripts\factor_diag.py eval `
+python .\scripts\p2\factor_diag.py eval `
   --root . `
   --rules .\rules_factors.yaml `
   --factor-id beta_252d `
@@ -71,3 +71,4 @@ for t in targets:
 print("\nALL_TARGETS_PASSED =", ok)
 '@ | python -
 ```
+

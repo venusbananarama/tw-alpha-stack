@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from alpha_core.phase2 import GateFailError, MissingInputsError, Phase2RunConfig, RulesSchemaError  # noqa: E402
+from alpha_core.phase2 import contracts as p2_contracts  # noqa: E402
 from alpha_core.phase2 import pipeline as p2_pipeline  # noqa: E402
 from alpha_core.phase2 import paths as p2_paths  # noqa: E402
 
@@ -19,22 +20,6 @@ def _parse_date(value: Optional[str]) -> date:
     if value:
         return date.fromisoformat(value)
     return p2_paths.default_as_of_date()
-
-
-def _build_run_id(as_of: str, engine: str, profile: str, preset: str, user_run_id: Optional[str]) -> str:
-    if user_run_id:
-        return user_run_id
-    return f"p2.{as_of}.{engine}.{profile}.{preset}"
-
-
-def _resolve_gate_policy(profile: str, gate_policy_arg: Optional[str]) -> str:
-    val = (gate_policy_arg or "").strip().lower()
-    if val in ("require_pass", "allow_fail"):
-        return val
-    p = (profile or "").strip().lower()
-    if p in ("live", "prod", "production"):
-        return "require_pass"
-    return "allow_fail"
 
 
 def _add_common_args(parser: argparse.ArgumentParser) -> None:
@@ -119,8 +104,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.command == "run":
             as_of_date = _parse_date(args.as_of)
-            run_id = _build_run_id(as_of_date.isoformat(), args.engine, args.profile, args.preset, args.run_id or None)
-            gate_policy = _resolve_gate_policy(args.profile, args.gate_policy)
+            run_id = p2_paths.build_run_id(
+                as_of_date.isoformat(),
+                args.engine,
+                args.profile,
+                args.preset,
+                args.run_id or None,
+            )
+            gate_policy = p2_contracts.resolve_gate_policy(args.profile, args.gate_policy)
             cfg = Phase2RunConfig(
                 root=root,
                 rules_path=rules_path,
@@ -153,3 +144,5 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+

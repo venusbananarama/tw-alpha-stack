@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-alpha_core.factor_impl.size_impl
+alpha_core.phase2.factor_impl.size_impl
 
 Size family (size_log_mktcap).
 """
@@ -10,7 +10,7 @@ import numpy as np
 from datetime import date
 from typing import Any, Optional
 
-from alpha_core.factor_xform import apply_xsection_xform, winsorize_xsection
+from alpha_core.phase2.corelib.factor_xform import apply_xsection_xform, winsorize_xsection
 
 
 def winsorize_by_quantile(series: pd.Series, q: float = 0.01) -> pd.Series:

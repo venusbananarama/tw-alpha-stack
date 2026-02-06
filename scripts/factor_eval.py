@@ -8,8 +8,8 @@ Phase-2 factor evaluation CLI entry（命令列入口）
 角色：
 - 提供穩定的 CLI 介面：
     --root / --factors / --factor-id / --factor-list / --windows / --as-of / --log-level
-- 收集 factor_ids 與 WF 視窗設定，交給 alpha_core.factor_eval.evaluate_factors 執行。
-- 不實作評估邏輯，本身只是薄殼；評估與輸出格式由 alpha_core.factor_eval 負責。
+- 收集 factor_ids 與 WF 視窗設定，交給 alpha_core.phase2.corelib.factor_eval.evaluate_factors 執行。
+- 不實作評估邏輯，本身只是薄殼；評估與輸出格式由 alpha_core.phase2.corelib.factor_eval 負責。
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from alpha_core.factor_eval import evaluate_factors  # noqa: E402
+from alpha_core.phase2.corelib.factor_eval import evaluate_factors  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -240,3 +240,5 @@ def main(argv: Optional[Sequence[str]] = None):  # -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+

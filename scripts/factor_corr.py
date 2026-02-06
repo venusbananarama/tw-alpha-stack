@@ -7,7 +7,7 @@ Phase-2「corr」階段的單一入口 Script。
 
 功能：
 - 從 factor parquet 或預先產好的 panel 寬表讀取因子資料。
-- 呼叫 alpha_core.corr_lib 計算：
+- 呼叫 alpha_core.phase2.corelib.corr_lib 計算：
     1) 相關矩陣（corr matrix）
     2) 攤平後的 pair list
     3) max |corr| 等摘要資訊
@@ -18,7 +18,7 @@ Phase-2「corr」階段的單一入口 Script。
 
 設計重點：
 - CLI 介面與 Run-Phase2-OneClick.ps1 對齊（root/rules/as-of/windows/engine/profile/panel-source）。
-- I/O 與 orchestration 集中在這支 script，數學計算委託 alpha_core.corr_lib。
+- I/O 與 orchestration 集中在這支 script，數學計算委託 alpha_core.phase2.corelib.corr_lib。
 - 不建立 wrapper / alias，只提供單一入口檔。
 """
 
@@ -45,7 +45,7 @@ _REPO_ROOT = _THIS_DIR.parent  # C:\AI\tw-alpha-stack
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from alpha_core.corr_lib import (  # type: ignore[import]
+from alpha_core.phase2.corelib.corr_lib import (  # type: ignore[import]
     compute_corr_matrix,
     corr_matrix_to_pairs,
     summarize_corr,
@@ -497,7 +497,7 @@ def run_corr_job(job: FactorCorrJob) -> None:
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compute factor correlation matrix / pairs / summary using alpha_core.corr_lib.",
+        description="Compute factor correlation matrix / pairs / summary using alpha_core.phase2.corelib.corr_lib.",
     )
 
     parser.add_argument(
@@ -741,3 +741,5 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
