@@ -14,7 +14,7 @@ param(
 $ErrorActionPreference='Stop'
 
 $python    = ".\.venv\Scripts\python.exe"
-$py_combo  = ".\scripts\factor_combo.py"
+$py_combo  = ".\scripts\p2\factor_combo.py"
 if(!(Test-Path $python)) { throw "Python venv not found: $python" }
 if(!(Test-Path $py_combo)) { throw "Missing script: $py_combo" }
 
@@ -36,3 +36,4 @@ $cmd = @(
   "--output", $Output
 )
 & $python @cmd
+

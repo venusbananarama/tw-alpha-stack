@@ -1,10 +1,11 @@
 import json
+import sys
+import types
 from pathlib import Path
 
 import pandas as pd
 
 import scripts.exec_replay as exec_replay
-import scripts.wf_runner as wf_runner
 from alpha_core.phase4 import runner
 
 
@@ -46,7 +47,10 @@ def test_runner_drift_empty_all_continues(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(exec_replay, "run_exec_replay", _stub_run_exec_replay)
     monkeypatch.setattr(runner.pd, "read_parquet", _stub_read_parquet)
-    monkeypatch.setattr(wf_runner, "_run_p4", _stub_wf_run)
+
+    wf_runner_stub = types.ModuleType("scripts.wf_runner")
+    wf_runner_stub._run_p4 = _stub_wf_run
+    monkeypatch.setitem(sys.modules, "scripts.wf_runner", wf_runner_stub)
 
     parser = runner.build_parser()
     args = parser.parse_args(
