@@ -13,6 +13,7 @@ from . import evidence as evidence_mod
 from . import gate as gate_mod
 from . import paths
 from . import plan as plan_mod
+from . import repair as repair_mod
 from . import registry
 from . import status as status_mod
 from .contracts import (
@@ -57,6 +58,18 @@ def _stage_skip(name: str, message: str) -> StageResult:
     return StageResult(
         name=name,
         status="skip",
+        started_at=ts,
+        finished_at=ts,
+        outputs={},
+        message=message,
+    )
+
+
+def _stage_fail(name: str, message: str) -> StageResult:
+    ts = now_iso()
+    return StageResult(
+        name=name,
+        status="fail",
         started_at=ts,
         finished_at=ts,
         outputs={},
@@ -526,10 +539,45 @@ def run_phase2(cfg: Phase2RunConfig) -> Phase2RunResult:
     )
     artefacts.update({k: str(v) for k, v in gate_outputs.items()})
 
+    gate_pass = len(gate_eval.failed) == 0 and bool(
+        factor_slo.get("satisfied", True) if isinstance(factor_slo, Mapping) else True
+    )
+    if not gate_pass:
+        try:
+            repair_result = repair_mod.run_auto_repair(
+                root=root,
+                as_of=cfg.as_of.isoformat(),
+                profile=cfg.profile,
+                run_id=cfg.run_id,
+                gate_summary_path=gate_outputs["gate_summary"],
+                wf_summary_path=wf_path,
+                fail_results_path=gate_outputs["fail_results"],
+                windows=resolved_windows,
+            )
+            if repair_result is None:
+                stages.append(_stage_skip("repair", "auto_repair_disabled"))
+            else:
+                run_dir = Path(repair_result.run_dir)
+                outputs = {
+                    "repair_run_dir": str(run_dir),
+                    "repair_final_result": str(run_dir / "final_result.json"),
+                }
+                artefacts.update(outputs)
+                stages.append(
+                    _stage_ok(
+                        "repair",
+                        outputs=outputs,
+                        message=(
+                            f"attempted={repair_result.attempted} "
+                            f"repaired_pass={repair_result.passed} "
+                            f"selected={repair_result.selected_variant_id or ''}"
+                        ),
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001
+            stages.append(_stage_fail("repair", f"auto_repair_error={exc}"))
+
     if "evidence" not in preset_stages:
-        gate_pass = len(gate_eval.failed) == 0 and bool(
-            factor_slo.get("satisfied", True) if isinstance(factor_slo, Mapping) else True
-        )
         status = _resolve_final_status(gate_pass, cfg.gate_policy)
         return Phase2RunResult(
             run_id=cfg.run_id,
@@ -551,10 +599,6 @@ def run_phase2(cfg: Phase2RunConfig) -> Phase2RunResult:
     )
     stages.append(_stage_ok("evidence", outputs={"evidence_dir": str(evidence_dir)}))
     artefacts["evidence_dir"] = str(evidence_dir)
-
-    gate_pass = len(gate_eval.failed) == 0 and bool(
-        factor_slo.get("satisfied", True) if isinstance(factor_slo, Mapping) else True
-    )
 
     status = _resolve_final_status(gate_pass, cfg.gate_policy)
     return Phase2RunResult(

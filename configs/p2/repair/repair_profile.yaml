@@ -1,0 +1,38 @@
+schema: phase2_repair_profile.v1
+auto_repair:
+  default:
+    enabled: false
+    max_attempts: 4
+    stop_fast: true
+    promotion_mode: "off"
+    reason_allowlist:
+      - rank_ic_min_threshold
+  profiles:
+    dev:
+      enabled: true
+      max_attempts: 4
+      stop_fast: true
+      promotion_mode: "off"
+      reason_allowlist:
+        - rank_ic_min_threshold
+    test:
+      enabled: true
+      max_attempts: 4
+      stop_fast: true
+      promotion_mode: "off"
+      reason_allowlist:
+        - rank_ic_min_threshold
+    repair:
+      enabled: true
+      max_attempts: 4
+      stop_fast: true
+      promotion_mode: "off"
+      reason_allowlist:
+        - rank_ic_min_threshold
+    live:
+      enabled: false
+      max_attempts: 2
+      stop_fast: true
+      promotion_mode: "off"
+      reason_allowlist:
+        - rank_ic_min_threshold

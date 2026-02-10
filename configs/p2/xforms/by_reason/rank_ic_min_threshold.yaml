@@ -1,0 +1,99 @@
+schema: phase2_xforms.reason.v1
+reason: rank_ic_min_threshold
+variants:
+  - id: sign_flip
+    description: Flip factor sign to test directional inversion.
+    priority: 90
+    transforms:
+      - name: sign_flip
+        params: {}
+
+  - id: winsorize_rank_zscore
+    description: Robust cross-section normalization for heavy-tailed valuation factors.
+    priority: 80
+    transforms:
+      - name: winsorize
+        params:
+          lower_q: 0.02
+          upper_q: 0.98
+      - name: rank
+        params:
+          pct: true
+          center: true
+      - name: zscore
+        params:
+          ddof: 0
+          clip_std: 4.0
+
+  - id: clip_rank_zscore
+    description: Hard clip then normalize to reduce extreme valuation outliers.
+    priority: 70
+    transforms:
+      - name: clip
+        params:
+          lower: -8.0
+          upper: 8.0
+      - name: rank
+        params:
+          pct: true
+          center: true
+      - name: zscore
+        params:
+          ddof: 0
+          clip_std: 4.0
+
+  - id: fillna_rank_zscore_sign_flip
+    description: Fill sparse values, normalize, then test inverse direction.
+    priority: 60
+    transforms:
+      - name: fillna
+        params:
+          value: 0.0
+      - name: rank
+        params:
+          pct: true
+          center: true
+      - name: zscore
+        params:
+          ddof: 0
+          clip_std: 4.0
+      - name: sign_flip
+        params: {}
+
+  - id: lag_1
+    description: Apply one-period lag on factor values.
+    priority: 20
+    transforms:
+      - name: lag
+        params:
+          periods: 1
+
+  - id: lag_2
+    description: Apply two-period lag on factor values.
+    priority: 30
+    transforms:
+      - name: lag
+        params:
+          periods: 2
+
+  - id: smooth_3
+    description: Apply short rolling smooth.
+    priority: 10
+    transforms:
+      - name: smooth
+        params:
+          window: 3
+          min_periods: 1
+
+  - id: rank_then_zscore
+    description: Re-apply rank and zscore for stronger normalization.
+    priority: 40
+    transforms:
+      - name: rank
+        params:
+          pct: true
+          center: true
+      - name: zscore
+        params:
+          ddof: 0
+          clip_std: 4.0

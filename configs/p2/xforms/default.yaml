@@ -1,0 +1,15 @@
+schema: phase2_xforms.v1
+name: default
+transforms:
+  - name: winsorize
+    params:
+      lower_q: 0.01
+      upper_q: 0.99
+  - name: rank
+    params:
+      pct: true
+      center: true
+  - name: zscore
+    params:
+      ddof: 0
+      clip_std: 5.0

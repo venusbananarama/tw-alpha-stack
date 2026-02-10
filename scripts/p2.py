@@ -127,6 +127,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             result = p2_pipeline.run_phase2(cfg)
             print(f"[p2] status={result.status} gate_pass={result.gate_pass} run_id={result.run_id}")
+            repair_run_dir = result.artefacts.get("repair_run_dir")
+            if repair_run_dir:
+                print(f"[p2] repair_run_dir={repair_run_dir}")
             if result.gate_pass is False and gate_policy == "allow_fail":
                 print("[p2] gate=FAIL (non-blocking; gate_policy=allow_fail)")
             if result.gate_pass is False and gate_policy == "require_pass":
@@ -144,5 +147,4 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
 
